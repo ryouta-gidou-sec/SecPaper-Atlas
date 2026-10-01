@@ -1,0 +1,53 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Source papers and personal data
+papers/inbox/*.pdf
+papers/inbox/**/*.pdf
+data/*.db
+data/*.db-*
+data/*.sqlite
+data/*.sqlite-*
+data/ground_truth.local.csv
+logs/*
+!logs/.gitkeep
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+
+# Streamlit local secrets and caches (keep .streamlit/config.toml)
+.streamlit/secrets.toml
+.streamlit/credentials.toml
+.streamlit/cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Temporary and backup files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+~$*
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
