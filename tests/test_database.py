@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from src.database import Database, DuplicatePaperError
@@ -75,3 +77,53 @@ def test_manual_review_preserves_ai_values(database: Database) -> None:
     assert paper["relevance_reason"] == "Useful, but less central after human review."
     assert paper["ai_relevance_reason"] == "Strong match for the current research focus."
     assert paper["manually_reviewed"] is True
+
+
+def test_database_persists_extraction_provenance_and_pending_state(database: Database) -> None:
+    paper_id = database.add_paper(
+        file_hash="b" * 64,
+        filename="pending.pdf",
+        filepath="C:/papers/pending.pdf",
+        metadata=ExtractedMetadata(
+            title="A Pending Paper About Session Security",
+            introduction_excerpt="A bounded introduction excerpt for classification." * 4,
+            metadata_sources={"title": "first page layout"},
+            review_reasons=[],
+        ),
+        classification=None,
+        classification_error="OPENAI_API_KEY is not configured",
+    )
+    paper = database.get_paper(paper_id)
+    assert paper["classification_status"] == "pending"
+    assert paper["introduction_excerpt"].startswith("A bounded")
+    assert paper["metadata_sources"] == {"title": "first page layout"}
+    assert paper["metadata_review_reasons"] == []
+    assert len(database.search_papers(classification_statuses=["pending"])) == 1
+
+
+def test_initialize_migrates_legacy_papers_table_without_losing_rows(tmp_path) -> None:
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """CREATE TABLE papers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_hash TEXT NOT NULL UNIQUE,
+                primary_category TEXT,
+                relevance TEXT,
+                status TEXT,
+                year INTEGER,
+                ai_primary_category TEXT,
+                classification_error TEXT
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO papers (file_hash, status, ai_primary_category) VALUES (?, ?, ?)",
+            ("c" * 64, "Unread", "Authentication"),
+        )
+    migrated = Database(path)
+    migrated.initialize()
+    with migrated.connect() as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(papers)")}
+        row = connection.execute("SELECT * FROM papers WHERE file_hash = ?", ("c" * 64,)).fetchone()
+    assert {"introduction_excerpt", "metadata_review_reasons_json", "classification_status"} <= columns
+    assert row["classification_status"] == "classified"

@@ -7,7 +7,7 @@ import streamlit as st
 from src.classifier import ClassificationError, PaperClassifier
 from src.config import configure_logging, get_settings
 from src.database import Database
-from src.models import PaperStatus, PrimaryCategory, Relevance, enum_values
+from src.models import ClassificationStatus, PaperStatus, PrimaryCategory, Relevance, enum_values
 from src.scanner import scan_inbox
 
 
@@ -51,7 +51,7 @@ st.caption(
 
 with st.sidebar:
     st.header("Library")
-    if st.button("Scan papers/inbox", type="primary", use_container_width=True):
+    if st.button("Scan papers/inbox", type="primary", width="stretch"):
         classifier = None
         if settings.openai_api_key:
             try:
@@ -94,6 +94,9 @@ with st.sidebar:
     )
     relevances = st.multiselect("Relevance", enum_values(Relevance))
     statuses = st.multiselect("Status", enum_values(PaperStatus))
+    classification_statuses = st.multiselect(
+        "Classification status", enum_values(ClassificationStatus)
+    )
 
     all_papers_for_years = database.search_papers()
     known_years = [paper["year"] for paper in all_papers_for_years if paper["year"]]
@@ -101,8 +104,11 @@ with st.sidebar:
     year_max: int | None = None
     if known_years:
         lower, upper = min(known_years), max(known_years)
-        selected_range = st.slider("Publication year", lower, upper, (lower, upper))
-        year_min, year_max = selected_range
+        if lower < upper:
+            selected_range = st.slider("Publication year", lower, upper, (lower, upper))
+            year_min, year_max = selected_range
+        else:
+            st.caption(f"Publication year: {lower}")
 
 
 dashboard = database.dashboard_counts()
@@ -131,6 +137,7 @@ papers = database.search_papers(
     vulnerabilities=selected_vulnerabilities,
     relevances=relevances,
     statuses=statuses,
+    classification_statuses=classification_statuses,
     year_min=year_min,
     year_max=year_max,
 )
@@ -144,6 +151,7 @@ if papers:
             "Title": paper["title"] or paper["filename"],
             "Year": paper["year"],
             "Primary Category": paper["primary_category"] or "Unclassified",
+            "Classification": paper["classification_status"],
             "Tags": ", ".join(paper["tags"]),
             "Research Methods": ", ".join(paper["research_methods"]),
             "Relevance": paper["relevance"] or "—",
@@ -151,7 +159,7 @@ if papers:
         }
         for paper in papers
     ]
-    st.dataframe(table_rows, hide_index=True, use_container_width=True)
+    st.dataframe(table_rows, hide_index=True, width="stretch")
 
     options = {f"#{paper['id']} · {paper['title'] or paper['filename']}": paper["id"] for paper in papers}
     selected_label = st.selectbox("Open paper details", list(options))
@@ -171,6 +179,15 @@ if selected_paper:
         st.markdown("**Abstract**")
         st.write(selected_paper["abstract"] or "No abstract could be extracted.")
         st.markdown(f"**Keywords:** {', '.join(selected_paper['keywords']) or 'None extracted'}")
+        st.markdown(f"**Classification status:** {selected_paper['classification_status']}")
+        if selected_paper["metadata_review_reasons"]:
+            for reason in selected_paper["metadata_review_reasons"]:
+                st.warning(reason)
+        if not selected_paper["abstract"] and selected_paper["introduction_excerpt"]:
+            st.markdown("**Introduction excerpt (abstract fallback)**")
+            st.write(selected_paper["introduction_excerpt"])
+        with st.expander("Extraction sources"):
+            st.json(selected_paper["metadata_sources"])
         st.markdown(
             f"**Research methods:** {', '.join(selected_paper['research_methods']) or 'None'}"
         )
@@ -187,7 +204,7 @@ if selected_paper:
             st.warning(f"AI classification unavailable: {selected_paper['classification_error']}")
 
     with detail_right:
-        st.markdown("#### Review classification")
+        st.markdown("#### Human correction")
         category_options = enum_values(PrimaryCategory)
         relevance_options = enum_values(Relevance)
         status_options = enum_values(PaperStatus)

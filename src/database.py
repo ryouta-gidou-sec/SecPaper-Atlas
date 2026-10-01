@@ -11,6 +11,7 @@ from typing import Any, Iterator
 
 from src.models import (
     ClassificationResult,
+    ClassificationStatus,
     ExtractedMetadata,
     PaperStatus,
     PrimaryCategory,
@@ -31,8 +32,10 @@ CREATE TABLE IF NOT EXISTS papers (
     year INTEGER CHECK(year IS NULL OR year BETWEEN 1900 AND 2100),
     venue TEXT,
     abstract TEXT,
+    introduction_excerpt TEXT,
     keywords_json TEXT NOT NULL DEFAULT '[]',
     metadata_sources_json TEXT NOT NULL DEFAULT '{}',
+    metadata_review_reasons_json TEXT NOT NULL DEFAULT '[]',
     ai_primary_category TEXT CHECK(ai_primary_category IS NULL OR ai_primary_category IN (
         'Authentication', 'Session Management', 'Authorization', 'Token Security',
         'OAuth / OIDC / SSO', 'Account Management', 'Vulnerability Assessment', 'Other Security'
@@ -54,6 +57,8 @@ CREATE TABLE IF NOT EXISTS papers (
     status TEXT NOT NULL DEFAULT 'Unread'
         CHECK(status IN ('Unread', 'Screened', 'Read', 'Important')),
     manually_reviewed INTEGER NOT NULL DEFAULT 0 CHECK(manually_reviewed IN (0, 1)),
+    classification_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(classification_status IN ('pending', 'classified', 'failed', 'needs_review')),
     classification_error TEXT,
     processing_seconds REAL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -142,6 +147,33 @@ class Database:
     def initialize(self) -> None:
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            self._migrate_papers(connection)
+
+    @staticmethod
+    def _migrate_papers(connection: sqlite3.Connection) -> None:
+        """Add v0.1.1 metadata and classification state to existing databases."""
+
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(papers)").fetchall()
+        }
+        additions = {
+            "introduction_excerpt": "TEXT",
+            "metadata_review_reasons_json": "TEXT NOT NULL DEFAULT '[]'",
+            "classification_status": "TEXT NOT NULL DEFAULT 'pending'",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                connection.execute(f"ALTER TABLE papers ADD COLUMN {name} {declaration}")
+        connection.execute(
+            """UPDATE papers SET classification_status = 'classified'
+               WHERE classification_status = 'pending' AND ai_primary_category IS NOT NULL"""
+        )
+        connection.execute(
+            """UPDATE papers SET classification_status = 'failed'
+               WHERE classification_status = 'pending'
+                 AND classification_error IS NOT NULL
+                 AND classification_error NOT LIKE '%not configured%'"""
+        )
 
     def paper_exists(self, file_hash: str) -> bool:
         with self.connect() as connection:
@@ -149,6 +181,13 @@ class Database:
                 "SELECT 1 FROM papers WHERE file_hash = ?", (file_hash,)
             ).fetchone()
         return row is not None
+
+    def get_paper_by_hash(self, file_hash: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM papers WHERE file_hash = ?", (file_hash,)
+            ).fetchone()
+            return self._hydrate(connection, row) if row else None
 
     def add_paper(
         self,
@@ -159,6 +198,7 @@ class Database:
         metadata: ExtractedMetadata,
         classification: ClassificationResult | None,
         classification_error: str | None = None,
+        classification_status: ClassificationStatus | str | None = None,
         processing_seconds: float | None = None,
     ) -> int:
         """Insert a paper and both immutable AI and editable current labels."""
@@ -167,18 +207,31 @@ class Database:
         relevance = classification.relevance.value if classification else None
         reason = classification.relevance_reason if classification else None
         confidence = classification.relevance_confidence if classification else None
+        status = ClassificationStatus(
+            classification_status
+            or (
+                ClassificationStatus.CLASSIFIED
+                if classification
+                else (
+                    ClassificationStatus.NEEDS_REVIEW
+                    if metadata.review_reasons
+                    else ClassificationStatus.PENDING
+                )
+            )
+        ).value
         try:
             with self.connect() as connection:
                 cursor = connection.execute(
                     """
                     INSERT INTO papers (
                         file_hash, filename, filepath, title, authors_json, year, venue,
-                        abstract, keywords_json, metadata_sources_json,
+                        abstract, introduction_excerpt, keywords_json, metadata_sources_json,
+                        metadata_review_reasons_json, classification_status,
                         ai_primary_category, primary_category, ai_relevance, relevance,
                         ai_relevance_reason, relevance_reason,
                         ai_relevance_confidence, relevance_confidence,
                         classification_error, processing_seconds
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         file_hash,
@@ -189,8 +242,11 @@ class Database:
                         metadata.year,
                         metadata.venue,
                         metadata.abstract,
+                        metadata.introduction_excerpt,
                         json.dumps(metadata.keywords, ensure_ascii=False),
                         json.dumps(metadata.metadata_sources, ensure_ascii=False),
+                        json.dumps(metadata.review_reasons, ensure_ascii=False),
+                        status,
                         category,
                         category,
                         relevance,
@@ -229,6 +285,109 @@ class Database:
                 raise DuplicatePaperError("This PDF has already been registered") from exc
             raise
 
+    def update_metadata(
+        self,
+        paper_id: int,
+        metadata: ExtractedMetadata,
+        *,
+        classification_status: ClassificationStatus | str,
+        classification_error: str | None = None,
+    ) -> None:
+        status = ClassificationStatus(classification_status).value
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE papers SET title = ?, authors_json = ?, year = ?, venue = ?,
+                   abstract = ?, introduction_excerpt = ?, keywords_json = ?,
+                   metadata_sources_json = ?, metadata_review_reasons_json = ?,
+                   classification_status = ?, classification_error = ?,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?""",
+                (
+                    metadata.title,
+                    json.dumps(metadata.authors, ensure_ascii=False),
+                    metadata.year,
+                    metadata.venue,
+                    metadata.abstract,
+                    metadata.introduction_excerpt,
+                    json.dumps(metadata.keywords, ensure_ascii=False),
+                    json.dumps(metadata.metadata_sources, ensure_ascii=False),
+                    json.dumps(metadata.review_reasons, ensure_ascii=False),
+                    status,
+                    classification_error,
+                    paper_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"Paper {paper_id} does not exist")
+
+    def update_classification(
+        self,
+        paper_id: int,
+        classification: ClassificationResult | None,
+        *,
+        classification_status: ClassificationStatus | str,
+        classification_error: str | None = None,
+    ) -> None:
+        """Save a retry result while retaining any values already reviewed by a person."""
+
+        status = ClassificationStatus(classification_status).value
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT manually_reviewed FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Paper {paper_id} does not exist")
+            if classification is None:
+                connection.execute(
+                    """UPDATE papers SET classification_status = ?, classification_error = ?,
+                       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?""",
+                    (status, classification_error, paper_id),
+                )
+                return
+
+            category = classification.primary_category.value
+            relevance = classification.relevance.value
+            reason = classification.relevance_reason
+            confidence = classification.relevance_confidence
+            connection.execute(
+                """UPDATE papers SET ai_primary_category = ?, ai_relevance = ?,
+                   ai_relevance_reason = ?, ai_relevance_confidence = ?,
+                   classification_status = ?, classification_error = NULL,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?""",
+                (category, relevance, reason, confidence, status, paper_id),
+            )
+            self._replace_labels(connection, paper_id, "tags", classification.tags, "ai")
+            self._replace_labels(
+                connection, paper_id, "research_methods", classification.research_methods, "ai"
+            )
+            self._replace_labels(
+                connection,
+                paper_id,
+                "target_vulnerabilities",
+                classification.target_vulnerabilities,
+                "ai",
+            )
+            if not row["manually_reviewed"]:
+                connection.execute(
+                    """UPDATE papers SET primary_category = ?, relevance = ?, relevance_reason = ?,
+                       relevance_confidence = ? WHERE id = ?""",
+                    (category, relevance, reason, confidence, paper_id),
+                )
+                self._replace_labels(connection, paper_id, "tags", classification.tags, "current")
+                self._replace_labels(
+                    connection,
+                    paper_id,
+                    "research_methods",
+                    classification.research_methods,
+                    "current",
+                )
+                self._replace_labels(
+                    connection,
+                    paper_id,
+                    "target_vulnerabilities",
+                    classification.target_vulnerabilities,
+                    "current",
+                )
+
     def get_paper(self, paper_id: int) -> dict[str, Any] | None:
         with self.connect() as connection:
             row = connection.execute(
@@ -246,6 +405,7 @@ class Database:
         vulnerabilities: Sequence[str] = (),
         relevances: Sequence[str] = (),
         statuses: Sequence[str] = (),
+        classification_statuses: Sequence[str] = (),
         year_min: int | None = None,
         year_max: int | None = None,
     ) -> list[dict[str, Any]]:
@@ -276,6 +436,9 @@ class Database:
         self._add_in_filter(clauses, parameters, "p.primary_category", categories)
         self._add_in_filter(clauses, parameters, "p.relevance", relevances)
         self._add_in_filter(clauses, parameters, "p.status", statuses)
+        self._add_in_filter(
+            clauses, parameters, "p.classification_status", classification_statuses
+        )
         self._add_label_filter(clauses, parameters, "tags", tags)
         self._add_label_filter(clauses, parameters, "research_methods", methods)
         self._add_label_filter(
@@ -460,6 +623,9 @@ class Database:
         paper["authors"] = json.loads(paper.pop("authors_json"))
         paper["keywords"] = json.loads(paper.pop("keywords_json"))
         paper["metadata_sources"] = json.loads(paper.pop("metadata_sources_json"))
+        paper["metadata_review_reasons"] = json.loads(
+            paper.pop("metadata_review_reasons_json", "[]")
+        )
         for key in LABEL_TABLES:
             paper[key] = self._get_labels(connection, paper["id"], key, "current")
             paper[f"ai_{key}"] = self._get_labels(connection, paper["id"], key, "ai")

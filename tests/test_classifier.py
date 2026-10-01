@@ -38,7 +38,12 @@ def test_classifier_validates_structured_result() -> None:
         }
     )
     classifier = PaperClassifier(None, "test-model", client=fake_client(completions))
-    result = classifier.classify(title="Paper", abstract="Abstract", keywords=["IDOR"])
+    result = classifier.classify(
+        title="A Valid Paper About Authorization",
+        abstract="This study evaluates authorization failures across applications and reports its findings. "
+        * 2,
+        keywords=["IDOR"],
+    )
     assert result.primary_category.value == "Authorization"
     assert completions.last_kwargs["response_format"].__name__ == "ClassificationResult"
 
@@ -47,8 +52,25 @@ def test_classifier_sanitizes_provider_errors() -> None:
     completions = FakeCompletions(error=RuntimeError("request included a secret and paper text"))
     classifier = PaperClassifier(None, "test-model", client=fake_client(completions))
     with pytest.raises(ClassificationError, match=r"RuntimeError") as error:
-        classifier.classify(title="Paper", abstract="Abstract", keywords=[])
+        classifier.classify(
+            title="A Valid Paper About Authorization",
+            abstract="This study evaluates authorization failures across applications and reports its findings. "
+            * 2,
+            keywords=[],
+        )
     assert "secret" not in str(error.value)
+
+
+def test_classifier_blocks_bad_metadata_before_client_call() -> None:
+    completions = FakeCompletions()
+    classifier = PaperClassifier(None, "test-model", client=fake_client(completions))
+    with pytest.raises(ClassificationError, match="metadata review"):
+        classifier.classify(
+            title="reprinted from: random document",
+            abstract="This abstract is long enough but is paired with a bad title. " * 4,
+            keywords=[],
+        )
+    assert completions.last_kwargs == {}
 
 
 def test_payload_uses_introduction_only_when_abstract_missing() -> None:

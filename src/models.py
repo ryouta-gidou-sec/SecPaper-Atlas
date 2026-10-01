@@ -32,6 +32,13 @@ class PaperStatus(str, Enum):
     IMPORTANT = "Important"
 
 
+class ClassificationStatus(str, Enum):
+    PENDING = "pending"
+    CLASSIFIED = "classified"
+    FAILED = "failed"
+    NEEDS_REVIEW = "needs_review"
+
+
 DEFAULT_TAGS = (
     "Authentication",
     "Password",
@@ -101,6 +108,7 @@ class ExtractedMetadata(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     introduction_excerpt: str | None = None
     metadata_sources: dict[str, str] = Field(default_factory=dict)
+    review_reasons: list[str] = Field(default_factory=list)
 
     @field_validator("title", "venue", "abstract", "introduction_excerpt")
     @classmethod

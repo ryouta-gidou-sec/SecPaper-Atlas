@@ -118,7 +118,7 @@ Edit `.env` and replace `your_api_key_here` with your own key. The model is conf
 4. Review the per-paper result summary.
 5. Search and filter the library, then open a paper to correct its editable classification.
 
-If no API key is configured, local extraction still runs and the paper is saved as unclassified with a visible error. The original PDF is never modified. Adding a key later does not automatically retry previously registered hashes in v0.1.
+If no API key is configured, local extraction still runs and the paper is saved as pending with a visible status. Scanning the inbox again retries pending or failed classifications after a key is configured. Metadata that fails the input-quality gate is saved as needs review and is not sent to the API until a later scan produces usable title and abstract/introduction text. The original PDF is never modified.
 
 ## Classification model
 
@@ -176,10 +176,10 @@ Codex assisted with implementation, while the application itself uses the OpenAI
 ## Limitations
 
 - PDF layouts vary; scanned/image-only files require OCR, which v0.1 does not implement.
-- Metadata and title heuristics are conservative and will not be perfect.
+- Metadata extraction uses page layout and bounded heading recognition, but layouts vary and extracted values still need human review.
 - Classification quality depends on the extracted abstract and selected model.
 - Filtering multiple values within one facet currently uses “match any” semantics.
-- Previously saved API failures require manual review; automatic retry is future work.
+- Previously saved pending and failed classifications can be retried by scanning the inbox; records with unresolved metadata issues remain held for review.
 - SQLite and synchronous scanning target one local user, not a multi-user deployment.
 
 ## Future work

@@ -12,6 +12,7 @@ from src.models import (
     RESEARCH_METHODS,
     enum_values,
 )
+from src.metadata_extractor import classification_input_issues
 
 
 class ClassificationError(RuntimeError):
@@ -61,6 +62,14 @@ class PaperClassifier:
         introduction_excerpt: str | None = None,
     ) -> ClassificationResult:
         """Return a schema-validated classification or a sanitized error."""
+
+        issues = classification_input_issues(
+            title=title,
+            abstract=abstract,
+            introduction_excerpt=introduction_excerpt,
+        )
+        if issues:
+            raise ClassificationError("Classification held for metadata review")
 
         payload = build_classification_payload(
             title=title,
