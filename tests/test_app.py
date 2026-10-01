@@ -37,6 +37,8 @@ def test_library_dashboard_filters_detail_and_human_correction(
             keywords=["session"],
         ),
         classification=classification,
+        classification_provider="local",
+        classification_model="ui-test-model",
     )
     monkeypatch.setenv("DATABASE_PATH", str(database_path))
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -46,6 +48,10 @@ def test_library_dashboard_filters_detail_and_human_correction(
     assert any(item.value == "Research Paper Classifier" for item in app.title)
     assert app.dataframe[0].value.iloc[0]["Primary Category"] == "Session Management"
     assert app.dataframe[0].value.iloc[0]["Classification source"] == "AI, not reviewed"
+    assert app.dataframe[0].value.iloc[0]["AI Provider"] == "local"
+    assert app.dataframe[0].value.iloc[0]["AI Model"] == "ui-test-model"
+    assert any(item.value.startswith("Provider:") for item in app.caption)
+    assert any("AI Provider: local" in item.value for item in app.caption)
     assert {item.label for item in app.multiselect} >= {
         "Primary category",
         "Tags",

@@ -1,11 +1,13 @@
-"""Compute simple category metrics from a human-reviewed ground-truth CSV."""
+"""Compare human category labels with AI predictions from CSV or provider history."""
 
 from __future__ import annotations
 
 import argparse
 from collections import Counter
 import csv
+import json
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 
@@ -60,6 +62,34 @@ def load_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def evaluate_provider_rows(rows: list[dict[str, str]]) -> dict[tuple[str, str], dict[str, Any]]:
+    """Compare each provider/model to the same human labels, one latest run per hash."""
+    groups: dict[tuple[str, str], dict[str, dict[str, str]]] = {}
+    for row in rows:
+        key = (row.get("provider") or "unknown", row.get("model") or "unknown")
+        groups.setdefault(key, {})[row["file_hash"]] = row
+    return {key: evaluate_rows(list(papers.values())) for key, papers in groups.items()}
+
+
+def load_database_rows(path: Path) -> list[dict[str, str]]:
+    """Read successful run history and explicitly reviewed current labels, read-only."""
+    with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as connection:
+        connection.row_factory = sqlite3.Row
+        records = connection.execute(
+            """SELECT p.file_hash, p.primary_category AS ground_truth_category,
+                      r.provider, r.model, r.result_json
+               FROM classification_runs r JOIN papers p ON p.id = r.paper_id
+               WHERE p.manually_reviewed = 1 AND r.status = 'classified'
+               ORDER BY r.id"""
+        ).fetchall()
+    return [
+        {"file_hash": row["file_hash"], "ground_truth_category": row["ground_truth_category"],
+         "provider": row["provider"], "model": row["model"],
+         "ai_primary_category": json.loads(row["result_json"]).get("primary_category", "")}
+        for row in records if row["result_json"]
+    ]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -68,8 +98,21 @@ def main() -> None:
         type=Path,
         default=Path("data/ground_truth.csv"),
     )
+    parser.add_argument("--database", type=Path, help="Compare saved provider/model runs to Human Review labels")
     args = parser.parse_args()
+    if args.database:
+        groups = evaluate_provider_rows(load_database_rows(args.database))
+        if not groups:
+            print("No reviewed successful classification runs to evaluate.")
+        for (provider, model), result in groups.items():
+            print(f"Provider: {provider}; model: {model}")
+            print_metrics(result)
+        return
     result = evaluate_rows(load_rows(args.csv_path))
+    print_metrics(result)
+
+
+def print_metrics(result: dict[str, Any]) -> None:
     if not result["evaluated"]:
         print("No fully labeled rows to evaluate.")
         return

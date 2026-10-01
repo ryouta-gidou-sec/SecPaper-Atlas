@@ -6,24 +6,15 @@ from dataclasses import asdict, dataclass
 import logging
 from pathlib import Path
 import time
-from typing import Protocol
 
-from src.classifier import ClassificationError
+from src.classifier import ClassificationError, ClassifierProvider
 from src.database import Database, DuplicatePaperError
 from src.metadata_extractor import classification_input_issues, extract_metadata
 from src.models import ClassificationResult, ClassificationStatus, ExtractedMetadata
 from src.pdf_parser import discover_pdfs, parse_pdf, sha256_file
 
 
-class ClassifierProtocol(Protocol):
-    def classify(
-        self,
-        *,
-        title: str | None,
-        abstract: str | None,
-        keywords: list[str],
-        introduction_excerpt: str | None = None,
-    ) -> ClassificationResult: ...
+ClassifierProtocol = ClassifierProvider
 
 
 @dataclass(frozen=True)
@@ -44,8 +35,9 @@ def scan_inbox(
     database: Database,
     classifier: ClassifierProtocol | None,
     logger: logging.Logger,
+    reclassify: bool = False,
 ) -> list[ScanResult]:
-    """Process new PDFs and retry registered papers without a completed AI result."""
+    """Retry incomplete papers; reclassify completed hashes only when explicitly requested."""
 
     results: list[ScanResult] = []
     for path in discover_pdfs(inbox_dir):
@@ -53,11 +45,11 @@ def scan_inbox(
         try:
             file_hash = sha256_file(path)
             existing = database.get_paper_by_hash(file_hash)
-            retrying = existing is not None and existing["classification_status"] in {
+            retrying = existing is not None and (reclassify or existing["classification_status"] in {
                 ClassificationStatus.PENDING.value,
                 ClassificationStatus.FAILED.value,
                 ClassificationStatus.NEEDS_REVIEW.value,
-            }
+            })
             if existing is not None and not retrying:
                 results.append(ScanResult(path.name, "Skipped", "Already registered"))
                 continue
@@ -81,7 +73,7 @@ def scan_inbox(
                 classification_error = "Classification held for metadata review"
             elif classifier is None:
                 classification_status = ClassificationStatus.PENDING
-                classification_error = "OPENAI_API_KEY is not configured"
+                classification_error = "Classifier is not configured"
             else:
                 try:
                     classification = classifier.classify(
@@ -117,6 +109,8 @@ def scan_inbox(
                     classification,
                     classification_status=classification_status,
                     classification_error=classification_error,
+                    classification_provider=getattr(classifier, "provider", None),
+                    classification_model=getattr(classifier, "model", None),
                 )
             else:
                 paper_id = database.add_paper(
@@ -128,6 +122,8 @@ def scan_inbox(
                     classification_error=classification_error,
                     classification_status=classification_status,
                     processing_seconds=elapsed,
+                    classification_provider=getattr(classifier, "provider", None),
+                    classification_model=getattr(classifier, "model", None),
                 )
             if classification_error:
                 result_status = {

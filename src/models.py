@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -149,6 +149,14 @@ class ClassificationResult(BaseModel):
         if not cleaned:
             raise ValueError("relevance_reason must not be blank")
         return cleaned
+
+
+class ClassificationProvenance(BaseModel):
+    """Provider metadata, independent of provider response fields."""
+
+    model_config = ConfigDict(extra="forbid")
+    provider: Literal["local", "openai"] | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 def enum_values(enum_type: type[Enum]) -> list[str]:

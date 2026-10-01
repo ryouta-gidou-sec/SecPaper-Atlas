@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from src.classifier import ClassificationError, PaperClassifier
+from src.classifier import ClassificationError, create_classifier
 from src.config import configure_logging, get_settings
 from src.database import Database
 from src.models import ClassificationStatus, PaperStatus, PrimaryCategory, Relevance, enum_values
@@ -50,24 +50,29 @@ st.caption(
 )
 
 with st.sidebar:
+    st.header("Classifier")
+    st.caption(f"Provider: {settings.classifier_provider}")
+    st.caption(f"Model: {settings.classifier_model or 'Not configured'}")
+    st.caption("Local processing on this PC" if settings.classifier_provider == "local"
+               else "Extracted classification input is sent to OpenAI")
     st.header("Library")
     if st.button("Scan papers/inbox", type="primary", width="stretch"):
         classifier = None
-        if settings.openai_api_key:
-            try:
-                classifier = PaperClassifier(
-                    api_key=settings.openai_api_key,
-                    model=settings.openai_model,
-                )
-            except ClassificationError as exc:
-                st.error(str(exc))
+        try:
+            classifier = create_classifier(settings)
+        except ClassificationError as exc:
+            st.error(str(exc))
         with st.spinner("Scanning new PDFs…"):
-            scan_results = scan_inbox(
-                inbox_dir=settings.inbox_dir,
-                database=database,
-                classifier=classifier,
-                logger=logger,
-            )
+            try:
+                scan_results = scan_inbox(
+                    inbox_dir=settings.inbox_dir,
+                    database=database,
+                    classifier=classifier,
+                    logger=logger,
+                )
+            finally:
+                if classifier is not None:
+                    classifier.close()
         if not scan_results:
             st.info("No valid PDFs found in papers/inbox.")
         else:
@@ -160,6 +165,8 @@ if papers:
                 else "No AI result"
             ),
             "Classification": paper["classification_status"],
+            "AI Provider": paper["classification_provider"] or "—",
+            "AI Model": paper["classification_model"] or "—",
             "Tags": ", ".join(paper["effective_tags"]),
             "Research Methods": ", ".join(paper["effective_research_methods"]),
             "Relevance": paper["effective_relevance"] or "—",
@@ -188,6 +195,19 @@ if selected_paper:
         st.write(selected_paper["abstract"] or "No abstract could be extracted.")
         st.markdown(f"**Keywords:** {', '.join(selected_paper['keywords']) or 'None extracted'}")
         st.markdown(f"**Classification status:** {selected_paper['classification_status']}")
+        st.caption(
+            f"AI Provider: {selected_paper['classification_provider'] or 'Unknown'} · "
+            f"Model: {selected_paper['classification_model'] or 'Unknown'} · "
+            f"Classified at: {selected_paper['classified_at'] or 'Unknown'}"
+        )
+        with st.expander("AI classification history"):
+            for run in database.classification_history(selected_paper["id"]):
+                st.caption(f"#{run['id']} · {run['provider'] or 'Unknown'} · "
+                           f"{run['model'] or 'Unknown'} · {run['status']}")
+                if run["result"]:
+                    st.json(run["result"])
+                elif run["error"]:
+                    st.write(run["error"])
         if selected_paper["metadata_review_reasons"]:
             for reason in selected_paper["metadata_review_reasons"]:
                 st.warning(reason)
@@ -302,7 +322,7 @@ if selected_paper:
                 st.success("Review saved. The original AI values were preserved.")
                 st.rerun()
 
-        with st.expander("Original AI result"):
+        with st.expander("Latest AI result (earlier originals in history)"):
             st.write(f"Category: {selected_paper['ai_primary_category'] or 'Unavailable'}")
             st.write(f"Tags: {', '.join(selected_paper['ai_tags']) or 'Unavailable'}")
             st.write(

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This project uses AI in two separate roles: Codex as a development assistant and the OpenAI API as a runtime paper-classification component. AI use is disclosed because responsible engineering depends on knowing where probabilistic systems influenced the product.
+This project uses AI in two roles: Codex as a development assistant, and local Ollama (default) or an explicitly selected OpenAI API as the runtime classifier. AI use is disclosed because responsible engineering depends on knowing where probabilistic systems influenced the product.
 
 ## Codex in development
 
@@ -16,7 +16,9 @@ AI-assisted code is treated like code from any other untrusted draft source:
 4. Run the complete test suite.
 5. Manually review security-sensitive behavior, especially file handling, secrets, external requests, and SQL.
 
-## OpenAI API in the application
+## Local and optional OpenAI classification
+
+Local classification uses loopback Ollama and an installed local model. Cloud references and remote endpoints are rejected, and there is no fallback to OpenAI. Run the Ollama server with `OLLAMA_NO_CLOUD=1`. Only selecting OpenAI discloses minimal paper input externally. Model installation/download is explicit and separate from classification.
 
 The runtime classifier receives a deliberately limited input: title, abstract, keywords, and only when the abstract is missing, a short introduction excerpt. It does not receive the source PDF or the full extracted document.
 
@@ -32,7 +34,7 @@ Structured output and schema validation reduce format errors. They do not make t
 
 ## Human authority
 
-AI output is a proposal, not ground truth. The interface lets a user correct category, tags, methods, vulnerabilities, relevance, its reason, and reading status. The database keeps the original `ai_*` values and separate current values, and sets `manually_reviewed` after a review. That separation supports auditability and later quality measurement.
+AI output is a proposal, not ground truth. Users can correct category, tags, methods, vulnerabilities, relevance, reason and reading status. The database retains original predictions in classification_runs, a latest ai_* projection, and separate human current values. Only an explicit review save sets manually_reviewed. Before review, AI is a display/filter fallback and current values remain empty. Retries retain prior AI originals and human values.
 
 Humans should decide:
 

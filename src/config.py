@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from logging.handlers import RotatingFileHandler
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -23,8 +23,17 @@ class Settings:
     data_dir: Path
     logs_dir: Path
     database_path: Path
-    openai_api_key: str | None
+    openai_api_key: str | None = field(repr=False)
     openai_model: str
+    classifier_provider: str = "local"
+    local_llm_model: str = ""
+    local_llm_base_url: str = "http://127.0.0.1:11434"
+    local_llm_timeout: float = 180
+    local_llm_validation_retries: int = 1
+
+    @property
+    def classifier_model(self) -> str:
+        return self.local_llm_model if self.classifier_provider == "local" else self.openai_model
 
     def ensure_directories(self) -> None:
         """Create application-owned directories without touching source PDFs."""
@@ -47,6 +56,11 @@ def get_settings(project_root: Path | None = None) -> Settings:
         database_path=Path(os.getenv("DATABASE_PATH", str(data_dir / "papers.db"))).resolve(),
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        classifier_provider=os.getenv("CLASSIFIER_PROVIDER", "local").strip().lower(),
+        local_llm_model=os.getenv("LOCAL_LLM_MODEL", "").strip(),
+        local_llm_base_url=os.getenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434"),
+        local_llm_timeout=float(os.getenv("LOCAL_LLM_TIMEOUT", "180")),
+        local_llm_validation_retries=int(os.getenv("LOCAL_LLM_VALIDATION_RETRIES", "1")),
     )
 
 

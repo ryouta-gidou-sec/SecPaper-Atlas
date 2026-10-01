@@ -11,6 +11,7 @@ from typing import Any, Iterator
 
 from src.models import (
     ClassificationResult,
+    ClassificationProvenance,
     ClassificationStatus,
     ExtractedMetadata,
     PaperStatus,
@@ -60,6 +61,9 @@ CREATE TABLE IF NOT EXISTS papers (
     classification_status TEXT NOT NULL DEFAULT 'pending'
         CHECK(classification_status IN ('pending', 'classified', 'failed', 'needs_review')),
     classification_error TEXT,
+    classification_provider TEXT CHECK(classification_provider IN ('local', 'openai')),
+    classification_model TEXT,
+    classified_at TEXT,
     processing_seconds REAL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -69,6 +73,18 @@ CREATE TABLE IF NOT EXISTS tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE COLLATE NOCASE
 );
+CREATE TABLE IF NOT EXISTS classification_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+    provider TEXT CHECK(provider IN ('local', 'openai')),
+    model TEXT,
+    status TEXT NOT NULL CHECK(status IN ('classified', 'failed')),
+    result_json TEXT,
+    error TEXT,
+    classified_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_classification_runs_paper ON classification_runs(paper_id);
 CREATE TABLE IF NOT EXISTS research_methods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE COLLATE NOCASE
@@ -161,6 +177,9 @@ class Database:
             "metadata_review_reasons_json": "TEXT NOT NULL DEFAULT '[]'",
             "classification_status": "TEXT NOT NULL DEFAULT 'pending'",
             "manually_reviewed": "INTEGER NOT NULL DEFAULT 0",
+            "classification_provider": "TEXT CHECK(classification_provider IN ('local', 'openai'))",
+            "classification_model": "TEXT",
+            "classified_at": "TEXT",
         }
         for name, declaration in additions.items():
             if name not in columns:
@@ -197,6 +216,26 @@ class Database:
                 f"""DELETE FROM {junction} WHERE value_source = 'current'
                     AND paper_id IN (SELECT id FROM papers WHERE manually_reviewed = 0)"""
             )
+        # Preserve pre-provider AI originals without inventing their provenance/date.
+        for row in connection.execute(
+            """SELECT * FROM papers p WHERE ai_primary_category IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM classification_runs r WHERE r.paper_id = p.id)"""
+        ).fetchall():
+            paper = dict(row)
+            snapshot = {
+                key: paper.get(f"ai_{key}") for key in (
+                    "primary_category", "relevance", "relevance_reason", "relevance_confidence"
+                )
+            }
+            for key in LABEL_TABLES:
+                snapshot[key] = Database._get_labels(connection, paper["id"], key, "ai")
+            connection.execute(
+                """INSERT INTO classification_runs
+                   (paper_id, provider, model, status, result_json, classified_at)
+                   VALUES (?, ?, ?, 'classified', ?, ?)""",
+                (paper["id"], paper.get("classification_provider"), paper.get("classification_model"),
+                 json.dumps(snapshot, ensure_ascii=False), paper.get("classified_at")),
+            )
 
     def paper_exists(self, file_hash: str) -> bool:
         with self.connect() as connection:
@@ -223,9 +262,14 @@ class Database:
         classification_error: str | None = None,
         classification_status: ClassificationStatus | str | None = None,
         processing_seconds: float | None = None,
+        classification_provider: str | None = None,
+        classification_model: str | None = None,
     ) -> int:
         """Insert AI output while leaving human-reviewed values unset."""
 
+        provenance = ClassificationProvenance(provider=classification_provider, model=classification_model)
+        if classification is not None:
+            classification = ClassificationResult.model_validate(classification)
         category = classification.primary_category.value if classification else None
         relevance = classification.relevance.value if classification else None
         reason = classification.relevance_reason if classification else None
@@ -301,6 +345,9 @@ class Database:
                         classification.target_vulnerabilities,
                         "ai",
                     )
+                self._record_classification(
+                    connection, paper_id, classification, status, classification_error, provenance
+                )
                 return paper_id
         except sqlite3.IntegrityError as exc:
             if "file_hash" in str(exc):
@@ -348,16 +395,24 @@ class Database:
         *,
         classification_status: ClassificationStatus | str,
         classification_error: str | None = None,
+        classification_provider: str | None = None,
+        classification_model: str | None = None,
     ) -> None:
         """Save a retry result while retaining any values already reviewed by a person."""
 
         status = ClassificationStatus(classification_status).value
+        provenance = ClassificationProvenance(provider=classification_provider, model=classification_model)
+        if classification is not None:
+            classification = ClassificationResult.model_validate(classification)
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT manually_reviewed FROM papers WHERE id = ?", (paper_id,)
             ).fetchone()
             if row is None:
                 raise KeyError(f"Paper {paper_id} does not exist")
+            self._record_classification(
+                connection, paper_id, classification, status, classification_error, provenance
+            )
             if classification is None:
                 connection.execute(
                     """UPDATE papers SET classification_status = ?, classification_error = ?,
@@ -390,6 +445,47 @@ class Database:
             )
             # A retry replaces AI-owned values only. It never seeds or overwrites
             # the human-owned current values, regardless of review status.
+
+    @staticmethod
+    def _record_classification(
+        connection: sqlite3.Connection, paper_id: int,
+        classification: ClassificationResult | None, status: str,
+        error: str | None, provenance: ClassificationProvenance,
+    ) -> None:
+        """Append attempts; latest successful provenance belongs to ai_* fields."""
+        if classification is None and status != ClassificationStatus.FAILED.value:
+            return
+        timestamp = connection.execute(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+        ).fetchone()[0] if classification else None
+        connection.execute(
+            """INSERT INTO classification_runs
+               (paper_id, provider, model, status, result_json, error, classified_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (paper_id, provenance.provider, provenance.model,
+             'classified' if classification else 'failed',
+             classification.model_dump_json() if classification else None,
+             None if classification else error, timestamp),
+        )
+        if classification:
+            connection.execute(
+                """UPDATE papers SET classification_provider = ?, classification_model = ?,
+                   classified_at = ? WHERE id = ?""",
+                (provenance.provider, provenance.model, timestamp, paper_id),
+            )
+
+    def classification_history(self, paper_id: int) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM classification_runs WHERE paper_id = ? ORDER BY id", (paper_id,)
+            ).fetchall()
+        history = []
+        for row in rows:
+            item = dict(row)
+            result_json = item.pop("result_json")
+            item["result"] = json.loads(result_json) if result_json else None
+            history.append(item)
+        return history
 
     def get_paper(self, paper_id: int) -> dict[str, Any] | None:
         with self.connect() as connection:

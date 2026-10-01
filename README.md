@@ -6,7 +6,7 @@ A local-first Streamlit application that turns a folder of cybersecurity researc
 
 ## Overview
 
-Drop PDFs into `papers/inbox/`, start the app, and select **Scan papers/inbox**. The application detects new files by SHA-256, extracts defensible metadata with PyMuPDF, sends a minimal metadata payload to the OpenAI API for schema-constrained classification, validates the result with Pydantic, and stores it in SQLite. The dashboard then supports full-text-like keyword search, structured filters, and human review.
+Drop PDFs into `papers/inbox/`, start the app, and select **Scan papers/inbox**. The application detects new files by SHA-256, extracts metadata with PyMuPDF, classifies minimal input with a local Ollama model by default, validates structured results with Pydantic, and stores them in SQLite. OpenAI Structured Outputs remain an optional backend. The dashboard supports keyword search, filters, and human review.
 
 ## Background
 
@@ -25,8 +25,8 @@ Research Paper Classifier combines deterministic local processing with reviewabl
 
 1. Files are identified by content hash, not filename.
 2. PDF properties and extracted text provide title, authors, year, abstract, and keywords when available.
-3. Only the title, abstract, keywords, and—when the abstract is missing—a bounded introduction excerpt are sent to the OpenAI API.
-4. Structured Outputs are validated against a Pydantic schema.
+3. Only title, abstract, keywords, and—when the abstract is missing—a bounded introduction excerpt reach the selected classifier.
+4. Both providers share the classification schema and Pydantic validation.
 5. Original AI values and user-edited values are stored separately.
 6. Normalized label tables make tags, methods, and vulnerabilities filterable.
 
@@ -36,10 +36,13 @@ Research Paper Classifier combines deterministic local processing with reviewabl
 flowchart LR
     A[PDF in papers/inbox] -->|read only| B[PyMuPDF parser]
     B --> C[Metadata extractor]
-    C -->|minimal fields| D[OpenAI Structured Output]
+    C -->|quality gate + minimal fields| P{Provider setting}
+    P -->|local default| L[Ollama on this PC]
+    P -->|openai opt-in| D[OpenAI Structured Outputs]
+    L --> E[Pydantic validation]
     D --> E[Pydantic validation]
     E --> F[(SQLite)]
-    C -->|API unavailable or error| F
+    C -->|provider unavailable or error| F
     F --> G[Streamlit dashboard]
     G -->|human review| F
 ```
@@ -58,6 +61,8 @@ The pipeline is deliberately synchronous and small for a local v0.1. Each paper 
   - multiple target vulnerabilities;
   - relevance A, B, or C with reason and confidence
 - Local SQLite persistence with normalized searchable labels
+- Provider/model/timestamp provenance and retained classification history
+- Current provider/model in the sidebar and saved provenance in paper details
 - AI predictions remain separate from human values; unreviewed predictions are display/filter fallbacks only
 - Dashboard metrics and category chart
 - Keyword search over title, abstract, tags, and vulnerabilities
@@ -79,6 +84,7 @@ The pipeline is deliberately synchronous and small for a local v0.1. Each paper 
 ├── scripts/evaluate.py
 ├── src/
 │   ├── classifier.py
+│   ├── ollama_classifier.py
 │   ├── config.py
 │   ├── database.py
 │   ├── metadata_extractor.py
@@ -93,7 +99,7 @@ This layout keeps the Streamlit entry point obvious while separating extraction,
 
 ## Installation on Windows
 
-Prerequisites: Python 3.10 or newer and an OpenAI API key.
+Prerequisites: Python 3.10 or newer. Local classification requires Ollama and an explicitly downloaded local model. An OpenAI API key is optional.
 
 ```powershell
 git clone <repository-url>
@@ -102,10 +108,26 @@ py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-Copy-Item .env.example .env
+if (-not (Test-Path -LiteralPath .env)) { Copy-Item .env.example .env }
 ```
 
-Edit `.env` and replace `your_api_key_here` with your own key. The model is configurable through `OPENAI_MODEL`.
+Edit `.env` using the settings below; preserve any existing private settings. The app performs no installation or model download. See [docs/LOCAL_LLM.md](docs/LOCAL_LLM.md) for the proposed Windows setup.
+
+### Classifier settings
+
+```dotenv
+CLASSIFIER_PROVIDER=local
+LOCAL_LLM_MODEL=qwen3:4b
+LOCAL_LLM_BASE_URL=http://127.0.0.1:11434
+LOCAL_LLM_TIMEOUT=180
+LOCAL_LLM_VALIDATION_RETRIES=1
+```
+
+`local` is the default provider. The local model name has no code default and must name an installed model. Ollama receives the common JSON Schema. All fields are required and strictly validated. Invalid JSON/schema permits at most one regeneration; connection, timeout, missing-model and HTTP errors fail immediately. Malformed answers are not repaired or treated as valid.
+
+**Local Providerでは論文情報がPC外へ送信されない。** Only HTTP loopback endpoints are permitted. The client ignores proxies, rejects redirects/cloud model references, and confirms installed local model metadata before submitting paper text. Set `OLLAMA_NO_CLOUD=1` in the Ollama server environment and restart Ollama; loading the app's `.env` does not reconfigure an existing server. Model downloads and Ollama updates are separate network operations that do not carry paper inputs.
+
+For optional external classification, set `CLASSIFIER_PROVIDER=openai`, `OPENAI_API_KEY`, and `OPENAI_MODEL`. Only this selection creates an OpenAI client and sends input externally. There is no automatic fallback to OpenAI. SDK transport retries are disabled and requests have a 60-second timeout.
 
 ## Usage
 
@@ -120,7 +142,7 @@ Edit `.env` and replace `your_api_key_here` with your own key. The model is conf
 4. Review the per-paper result summary.
 5. Search and filter the library, then open a paper to correct its editable classification.
 
-If no API key is configured, local extraction still runs and the paper is saved as pending with a visible status. Scanning the inbox again retries pending or failed classifications after a key is configured. Metadata that fails the input-quality gate is saved as needs review and is not sent to the API until a later scan produces usable title and abstract/introduction text. The original PDF is never modified.
+If the selected classifier is unconfigured, extraction still runs and new papers are saved as pending. A configured but unavailable server/model or invalid response produces failed records. Scanning again retries pending, failed and needs_review records without inserting duplicate hashes. Classified records are skipped even after a provider/model change; intentional comparison runs can use `scan_inbox(..., reclassify=True)`. Metadata that fails the gate remains needs_review. Source PDFs stay untouched.
 
 ## Classification model
 
@@ -159,7 +181,7 @@ PDF parsers process untrusted, complex files. Run the app with normal user privi
 pytest
 ```
 
-The suite covers PDF discovery, hashing, duplicate handling, database registration and search, schema/category/relevance validation, AI mocking and error sanitization, metadata fallbacks, scan fault isolation, manual-review preservation, and baseline evaluation metrics. API calls are mocked; tests do not require a key or spend API credits.
+The suite covers extraction, hashing, database/search/migrations, strict JSON validation, mocked local/OpenAI failures, provider selection, local privacy boundaries, retries, review preservation and evaluation. Tests do not download models, start an LLM server, require a key or spend credits.
 
 ## Evaluation
 
@@ -171,9 +193,17 @@ python scripts/evaluate.py data/ground_truth.csv
 
 The v0.1 script reports primary-category accuracy plus per-category precision, recall, F1, and support. See [docs/EVALUATION.md](docs/EVALUATION.md) for sampling guidance and planned metadata/latency metrics.
 
+Compare saved provider/model runs with explicitly saved Human Review labels:
+
+```powershell
+python scripts/evaluate.py --database data/papers.db
+```
+
+The comparison uses the latest successful run per PDF hash in each provider/model group. Failed and unreviewed records are excluded; human labels are never copied automatically from AI.
+
 ## AI use and transparency
 
-Codex assisted with implementation, while the application itself uses the OpenAI API for paper classification. AI output is not treated as ground truth: it is schema-validated, visibly editable, and retained separately from human-reviewed values. The development and review policy is documented in [docs/AI_USAGE.md](docs/AI_USAGE.md).
+Codex assisted with implementation. The application uses local Ollama by default and OpenAI only when selected. AI output is schema-validated, visibly editable, retained separately from human values and never treated as ground truth. See [docs/AI_USAGE.md](docs/AI_USAGE.md).
 
 ## Limitations
 

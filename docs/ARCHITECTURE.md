@@ -11,7 +11,8 @@ Version 0.1 is a local, inspectable classification pipeline rather than a genera
 | `src/config.py` | Resolve application-owned paths and environment settings; configure rotating logs | Reads secrets from local environment only |
 | `src/pdf_parser.py` | Discover contained files, check signatures, hash content, extract bounded text and first-page block geometry | Parses untrusted PDFs locally, read-only |
 | `src/metadata_extractor.py` | Recover conservative bibliographic fields, provenance, and review reasons | Treats extracted text as untrusted data |
-| `src/classifier.py` | Build minimal API input, request Structured Output, validate with Pydantic | Only component that sends paper-derived data externally |
+| `src/classifier.py` | Common protocol, minimal input/prompt/schema, validation, factory and optional OpenAI provider | External paper disclosure only when OpenAI is selected |
+| `src/ollama_classifier.py` | Local model preflight and JSON Schema requests with bounded retry | Loopback only; no cloud inference or model download |
 | `src/database.py` | Own schema, transactions, bound SQL, search, and human-review updates | Persists private local research data |
 | `src/scanner.py` | Orchestrate stages and isolate failures per paper | Does not mutate input files |
 | `app.py` | Present dashboard, filters, detail, scan controls, and review form | User-facing local interface |
@@ -26,7 +27,7 @@ sequenceDiagram
     participant Scan as Scanner
     participant PDF as PDF parser
     participant Meta as Metadata extractor
-    participant AI as OpenAI boundary
+    participant AI as Selected classifier (local default / OpenAI opt-in)
     participant DB as SQLite
 
     User->>UI: Scan papers/inbox
@@ -88,7 +89,9 @@ Each junction row includes `value_source`, either `ai` or `current`. Initial cla
 
 All user values are bound parameters. Dynamic table and column identifiers are selected only from an internal constant mapping. Keyword search covers title, abstract, effective tags, and effective vulnerabilities. Category, tag, method, vulnerability, and relevance filters plus dashboard counts use AI values until a human review exists, then use current reviewed values. The Human correction form starts empty for unreviewed papers; saving it is the only operation that creates current values and sets `manually_reviewed=1`. Filters use “match any selected value” semantics.
 
-## AI API boundary
+## Classification provider boundary
+
+`ClassifierProvider` exposes provider, model, `classify(...) -> ClassificationResult` and `close()`. Scanner orchestration does not import provider clients. The factory defaults to local; OpenAI must be selected explicitly. `PaperClassifier` remains an alias of `OpenAIClassifier` for existing callers and mocks. Input gate, minimal payload, prompt, schema and output validation are shared. The local model name is configurable with no default in code.
 
 The request includes only:
 
@@ -98,6 +101,22 @@ The request includes only:
 - a 2,500-character introduction excerpt only if no abstract exists.
 
 Before a request, title must look usable and either an abstract of at least 80 characters or a bounded introduction excerpt of at least 120 characters must exist. Extraction review reasons and obvious diagram/noise text hold the item at `needs_review`; missing keywords alone do not. The OpenAI Python SDK's schema helper receives `ClassificationResult`, a Pydantic model with forbidden extra fields, enum-constrained primary category and relevance, bounded list sizes, a bounded explanation, and confidence between 0 and 1. The response is validated again before persistence. Provider exceptions are converted to an error containing only the exception type.
+
+Ollama `/api/chat` receives the same JSON Schema in `format`, with all fields required, `stream=false`, `think=false`, temperature 0, context 8192 tokens and output cap 1024 tokens. JSON is parsed and strictly validated with Pydantic; no fence removal, enum guessing, default filling or numeric-string coercion is performed. Only output validation failures permit 0 or 1 regeneration. Transport, HTTP and model errors are not retried. The default local timeout is 180 seconds (configurable up to 600); OpenAI transport retries are disabled with a 60-second timeout.
+
+### Local privacy
+
+**Local Providerでは論文情報がPC外へ送信されない。** Only HTTP loopback addresses are accepted; localhost is normalized to a literal address. URL credentials, paths, queries and fragments are rejected. The HTTP client ignores proxy settings and does not follow redirects. Cloud model references and `/api/show` responses with remote_host/remote_model are rejected before paper submission; installed local model metadata must be present. The app performs no downloads, external fallback or tool invocation.
+
+Run the trusted local Ollama server with `OLLAMA_NO_CLOUD=1` and restart it after changes. An app `.env` entry alone does not configure an already running server. Installation, model downloads and software updates can use the network separately; paper classification stays local.
+
+### Additive provenance migration
+
+Nullable papers columns `classification_provider` (local/openai), `classification_model`, and `classified_at` describe the latest successful ai_* projection. A failed retry changes workflow state without attributing an older success to the failing provider.
+
+New `classification_runs` rows retain provider/model, validated result JSON or sanitized failure, UTC classification time for successes, and creation time. Run insertion, latest AI update and labels share a transaction. Retries replace the latest AI projection but retain all previous originals in history; Human Review never edits that history or gets overwritten by retries. Existing AI rows are snapshotted once, with unknown historical provider/model/date left null. Old failures keep their diagnostics without invented provenance. Migration is idempotent.
+
+Normal scans skip classified hashes regardless of provider changes. Explicit `reclassify=True` enables deliberate comparison runs. Evaluation reads successful history and current human labels read-only, groups by provider/model, and uses the latest success per hash per group. The original CSV metrics remain available.
 
 ## PDF processing and source integrity
 
