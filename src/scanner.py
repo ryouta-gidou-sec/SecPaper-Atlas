@@ -19,6 +19,8 @@ ClassifierProtocol = ClassifierProvider
 
 @dataclass(frozen=True)
 class ScanResult:
+    """Per-paper outcome; elapsed time stops before persistence, result logging and UI work."""
+
     filename: str
     status: str
     message: str
@@ -37,7 +39,12 @@ def scan_inbox(
     logger: logging.Logger,
     reclassify: bool = False,
 ) -> list[ScanResult]:
-    """Retry incomplete papers; reclassify completed hashes only when explicitly requested."""
+    """Scan papers, measuring each non-skipped attempt through provider validation.
+
+    Duration includes hashing, duplicate lookup, parsing, extraction, input gating,
+    and any provider preflight/generation/validation retries. DB writes, logging
+    after measurement, and UI rendering are excluded. This is not AI-only time.
+    """
 
     results: list[ScanResult] = []
     for path in discover_pdfs(inbox_dir):
@@ -89,6 +96,7 @@ def scan_inbox(
                 else:
                     classification_status = ClassificationStatus.CLASSIFIED
 
+            # Keep the same measurement boundary for inserts and existing records.
             elapsed = time.perf_counter() - started
             if existing is not None:
                 paper_id = int(existing["id"])
@@ -111,6 +119,7 @@ def scan_inbox(
                     classification_error=classification_error,
                     classification_provider=getattr(classifier, "provider", None),
                     classification_model=getattr(classifier, "model", None),
+                    processing_seconds=elapsed,
                 )
             else:
                 paper_id = database.add_paper(

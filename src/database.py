@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 import json
+import math
 from pathlib import Path
 import sqlite3
 from typing import Any, Iterator
@@ -138,6 +139,21 @@ class DuplicatePaperError(RuntimeError):
     """Raised when a file hash already exists."""
 
 
+def _validated_processing_seconds(value: float | None) -> float | None:
+    """Accept optional, finite, non-negative elapsed seconds at the storage boundary."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("processing_seconds must be a finite non-negative number")
+    try:
+        seconds = float(value)
+    except OverflowError:
+        raise ValueError("processing_seconds must be a finite non-negative number") from None
+    if not math.isfinite(seconds) or seconds < 0:
+        raise ValueError("processing_seconds must be a finite non-negative number")
+    return seconds
+
+
 class Database:
     """Small repository layer that owns all SQL and transactions."""
 
@@ -267,6 +283,7 @@ class Database:
     ) -> int:
         """Insert AI output while leaving human-reviewed values unset."""
 
+        processing_seconds = _validated_processing_seconds(processing_seconds)
         provenance = ClassificationProvenance(provider=classification_provider, model=classification_model)
         if classification is not None:
             classification = ClassificationResult.model_validate(classification)
@@ -397,9 +414,11 @@ class Database:
         classification_error: str | None = None,
         classification_provider: str | None = None,
         classification_model: str | None = None,
+        processing_seconds: float | None = None,
     ) -> None:
-        """Save a retry result while retaining any values already reviewed by a person."""
+        """Save a retry result and its duration; omitted duration preserves the old value."""
 
+        processing_seconds = _validated_processing_seconds(processing_seconds)
         status = ClassificationStatus(classification_status).value
         provenance = ClassificationProvenance(provider=classification_provider, model=classification_model)
         if classification is not None:
@@ -416,8 +435,9 @@ class Database:
             if classification is None:
                 connection.execute(
                     """UPDATE papers SET classification_status = ?, classification_error = ?,
+                       processing_seconds = COALESCE(?, processing_seconds),
                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?""",
-                    (status, classification_error, paper_id),
+                    (status, classification_error, processing_seconds, paper_id),
                 )
                 return
 
@@ -429,8 +449,9 @@ class Database:
                 """UPDATE papers SET ai_primary_category = ?, ai_relevance = ?,
                    ai_relevance_reason = ?, ai_relevance_confidence = ?,
                    classification_status = ?, classification_error = NULL,
+                   processing_seconds = COALESCE(?, processing_seconds),
                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?""",
-                (category, relevance, reason, confidence, status, paper_id),
+                (category, relevance, reason, confidence, status, processing_seconds, paper_id),
             )
             self._replace_labels(connection, paper_id, "tags", classification.tags, "ai")
             self._replace_labels(

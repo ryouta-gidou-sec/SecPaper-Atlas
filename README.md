@@ -144,6 +144,17 @@ For optional external classification, set `CLASSIFIER_PROVIDER=openai`, `OPENAI_
 
 If the selected classifier is unconfigured, extraction still runs and new papers are saved as pending. A configured but unavailable server/model or invalid response produces failed records. Scanning again retries pending, failed and needs_review records without inserting duplicate hashes. Classified records are skipped even after a provider/model change; intentional comparison runs can use `scan_inbox(..., reclassify=True)`. Metadata that fails the gate remains needs_review. Source PDFs stay untouched.
 
+## Processing time
+
+`papers.processing_seconds` records the latest non-skipped scan attempt's elapsed
+seconds, from hash/duplicate checks through PDF parsing, extraction, input gating
+and classifier generation/validation. It includes bounded validation retries but
+excludes subsequent DB writes, result logging and UI rendering. It is not AI-only
+latency. Both new scans and retries save the current value, including failed or
+review-held attempts; skipped papers keep their previous value. Classification
+history retains earlier AI results, while this column holds only the latest attempt's
+duration. Existing databases need no schema migration.
+
 ## Classification model
 
 ### Primary categories

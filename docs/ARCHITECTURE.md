@@ -75,6 +75,29 @@ Scalar AI/current pairs preserve provenance:
 
 `manually_reviewed` distinguishes untouched AI output from a review. Before the first explicit review, current scalar fields and current label rows remain empty; classification writes only `ai_*` fields and `value_source='ai'` rows. Read and search results expose effective values without persisting a copy: AI values are the display/filter fallback while `manually_reviewed=0`, and current values take over after a review save. AI retries update only AI-owned values and never overwrite current values. Initialization adds missing workflow columns and clears the old AI-to-current projection only for unreviewed rows; reviewed rows and all AI originals are preserved. `classification_status` records `pending`, `classified`, `failed`, or `needs_review`; pending and failed records can be retried when scanning the inbox again. A needs-review record is re-extracted and is only sent when its input passes the quality gate. `classification_error` allows extraction results to survive an API or validation failure.
 
+### Processing duration
+
+`papers.processing_seconds` is the wall-clock duration in seconds of the latest
+non-skipped scanner attempt, measured with `time.perf_counter()`. Measurement starts
+before hashing and the duplicate lookup and ends after parsing, metadata extraction,
+the input quality gate, and any classifier preflight, generation and Pydantic
+validation (including bounded validation retries). It excludes the subsequent
+database writes, result logging and UI rendering. It is not classification-only
+latency; no separate extraction/classification duration columns are introduced.
+
+New inserts and existing-record retries use the same boundary. Successful, failed,
+pending and review-held attempts save their current measured duration; skipped
+classified hashes leave the previous duration and history unchanged. Duration and
+the classification result/history append share the classification-write transaction.
+The storage API accepts only finite non-negative durations. An omitted/None duration
+on a direct `update_classification()` call preserves the existing value, while zero
+is a valid measured value. No schema change or migration is required.
+
+`classification_runs` continues to preserve original validated answers and failures;
+it does not store per-run latency. `processing_seconds` describes the latest scan
+attempt, which may have failed while the latest successful AI projection is retained.
+Historical timings are not inferred or backfilled.
+
 ### Searchable many-to-many values
 
 ```text
