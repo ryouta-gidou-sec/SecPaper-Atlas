@@ -106,7 +106,8 @@ with st.sidebar:
         lower, upper = min(known_years), max(known_years)
         if lower < upper:
             selected_range = st.slider("Publication year", lower, upper, (lower, upper))
-            year_min, year_max = selected_range
+            if selected_range != (lower, upper):
+                year_min, year_max = selected_range
         else:
             st.caption(f"Publication year: {lower}")
 
@@ -150,11 +151,18 @@ if papers:
             "ID": paper["id"],
             "Title": paper["title"] or paper["filename"],
             "Year": paper["year"],
-            "Primary Category": paper["primary_category"] or "Unclassified",
+            "Primary Category": paper["effective_primary_category"] or "Unclassified",
+            "Classification source": "Human reviewed"
+            if paper["manually_reviewed"]
+            else (
+                "AI, not reviewed"
+                if paper["ai_primary_category"]
+                else "No AI result"
+            ),
             "Classification": paper["classification_status"],
-            "Tags": ", ".join(paper["tags"]),
-            "Research Methods": ", ".join(paper["research_methods"]),
-            "Relevance": paper["relevance"] or "—",
+            "Tags": ", ".join(paper["effective_tags"]),
+            "Research Methods": ", ".join(paper["effective_research_methods"]),
+            "Relevance": paper["effective_relevance"] or "—",
             "Status": paper["status"],
         }
         for paper in papers
@@ -188,16 +196,30 @@ if selected_paper:
             st.write(selected_paper["introduction_excerpt"])
         with st.expander("Extraction sources"):
             st.json(selected_paper["metadata_sources"])
+        if selected_paper["manually_reviewed"]:
+            classification_heading = "#### Classification — Human reviewed"
+        elif selected_paper["ai_primary_category"]:
+            classification_heading = "#### Classification — AI proposal, not reviewed"
+        else:
+            classification_heading = "#### Classification — unavailable"
+        st.markdown(classification_heading)
         st.markdown(
-            f"**Research methods:** {', '.join(selected_paper['research_methods']) or 'None'}"
+            f"**Primary category:** {selected_paper['effective_primary_category'] or 'Unavailable'}"
+        )
+        st.markdown(f"**Tags:** {', '.join(selected_paper['effective_tags']) or 'None'}")
+        st.markdown(
+            f"**Research methods:** {', '.join(selected_paper['effective_research_methods']) or 'None'}"
         )
         st.markdown(
             "**Target vulnerabilities:** "
-            + (", ".join(selected_paper["target_vulnerabilities"]) or "None")
+            + (", ".join(selected_paper["effective_target_vulnerabilities"]) or "None")
         )
-        st.markdown(f"**Relevance reason:** {selected_paper['relevance_reason'] or 'Unavailable'}")
+        st.markdown(f"**Relevance:** {selected_paper['effective_relevance'] or 'Unavailable'}")
         st.markdown(
-            f"**Confidence:** {selected_paper['relevance_confidence'] if selected_paper['relevance_confidence'] is not None else 'Unknown'}"
+            f"**Relevance reason:** {selected_paper['effective_relevance_reason'] or 'Unavailable'}"
+        )
+        st.markdown(
+            f"**Confidence:** {selected_paper['effective_relevance_confidence'] if selected_paper['effective_relevance_confidence'] is not None else 'Unknown'}"
         )
         st.code(selected_paper["filepath"], language=None)
         if selected_paper["classification_error"]:
@@ -205,39 +227,51 @@ if selected_paper:
 
     with detail_right:
         st.markdown("#### Human correction")
-        category_options = enum_values(PrimaryCategory)
-        relevance_options = enum_values(Relevance)
+        category_options = [None, *enum_values(PrimaryCategory)]
+        relevance_options = [None, *enum_values(Relevance)]
         status_options = enum_values(PaperStatus)
         with st.form(f"review-{selected_paper['id']}"):
             selected_category = st.selectbox(
                 "Primary category",
                 category_options,
                 index=category_options.index(selected_paper["primary_category"])
-                if selected_paper["primary_category"] in category_options
-                else category_options.index(PrimaryCategory.OTHER_SECURITY.value),
+                if selected_paper["manually_reviewed"]
+                and selected_paper["primary_category"] in category_options
+                else 0,
+                format_func=lambda value: value or "Select a category",
             )
             tags_text = st.text_area(
                 "Tags (comma-separated; custom tags allowed)",
-                value=", ".join(selected_paper["tags"]),
+                value=", ".join(selected_paper["tags"])
+                if selected_paper["manually_reviewed"]
+                else "",
             )
             methods_text = st.text_area(
                 "Research methods (comma-separated)",
-                value=", ".join(selected_paper["research_methods"]),
+                value=", ".join(selected_paper["research_methods"])
+                if selected_paper["manually_reviewed"]
+                else "",
             )
             vulnerabilities_text = st.text_area(
                 "Target vulnerabilities (comma-separated)",
-                value=", ".join(selected_paper["target_vulnerabilities"]),
+                value=", ".join(selected_paper["target_vulnerabilities"])
+                if selected_paper["manually_reviewed"]
+                else "",
             )
             selected_relevance = st.selectbox(
                 "Relevance",
                 relevance_options,
                 index=relevance_options.index(selected_paper["relevance"])
-                if selected_paper["relevance"] in relevance_options
-                else 1,
+                if selected_paper["manually_reviewed"]
+                and selected_paper["relevance"] in relevance_options
+                else 0,
+                format_func=lambda value: value or "Select relevance",
             )
             relevance_reason = st.text_area(
                 "Relevance reason",
-                value=selected_paper["relevance_reason"] or "",
+                value=(selected_paper["relevance_reason"] or "")
+                if selected_paper["manually_reviewed"]
+                else "",
                 max_chars=500,
             )
             selected_status = st.selectbox(
@@ -247,23 +281,26 @@ if selected_paper:
             )
             submitted = st.form_submit_button("Save review", type="primary")
         if submitted:
-            edited_tags = [item.strip() for item in tags_text.split(",") if item.strip()]
-            edited_methods = [item.strip() for item in methods_text.split(",") if item.strip()]
-            edited_vulnerabilities = [
-                item.strip() for item in vulnerabilities_text.split(",") if item.strip()
-            ]
-            database.update_review(
-                selected_paper["id"],
-                primary_category=selected_category,
-                tags=edited_tags,
-                relevance=selected_relevance,
-                status=selected_status,
-                research_methods=edited_methods,
-                target_vulnerabilities=edited_vulnerabilities,
-                relevance_reason=relevance_reason,
-            )
-            st.success("Review saved. The original AI values were preserved.")
-            st.rerun()
+            if selected_category is None or selected_relevance is None:
+                st.error("Select a primary category and relevance before saving the review.")
+            else:
+                edited_tags = [item.strip() for item in tags_text.split(",") if item.strip()]
+                edited_methods = [item.strip() for item in methods_text.split(",") if item.strip()]
+                edited_vulnerabilities = [
+                    item.strip() for item in vulnerabilities_text.split(",") if item.strip()
+                ]
+                database.update_review(
+                    selected_paper["id"],
+                    primary_category=selected_category,
+                    tags=edited_tags,
+                    relevance=selected_relevance,
+                    status=selected_status,
+                    research_methods=edited_methods,
+                    target_vulnerabilities=edited_vulnerabilities,
+                    relevance_reason=relevance_reason,
+                )
+                st.success("Review saved. The original AI values were preserved.")
+                st.rerun()
 
         with st.expander("Original AI result"):
             st.write(f"Category: {selected_paper['ai_primary_category'] or 'Unavailable'}")

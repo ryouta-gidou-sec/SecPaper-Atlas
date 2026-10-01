@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from src.database import Database
@@ -43,6 +44,8 @@ def test_library_dashboard_filters_detail_and_human_correction(
     app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run(timeout=15)
     assert not app.exception
     assert any(item.value == "Research Paper Classifier" for item in app.title)
+    assert app.dataframe[0].value.iloc[0]["Primary Category"] == "Session Management"
+    assert app.dataframe[0].value.iloc[0]["Classification source"] == "AI, not reviewed"
     assert {item.label for item in app.multiselect} >= {
         "Primary category",
         "Tags",
@@ -55,6 +58,14 @@ def test_library_dashboard_filters_detail_and_human_correction(
     assert any(item.label == "Keyword" for item in app.text_input)
     assert any(item.label == "Open paper details" for item in app.selectbox)
     assert any(item.label == "Tags (comma-separated; custom tags allowed)" for item in app.text_area)
+    assert next(
+        item for item in app.selectbox if item.label == "Primary category"
+    ).value is None
+    assert next(item for item in app.selectbox if item.label == "Relevance").value is None
+    assert next(
+        item for item in app.text_area
+        if item.label == "Tags (comma-separated; custom tags allowed)"
+    ).value == ""
 
     category_filter = next(item for item in app.multiselect if item.label == "Primary category")
     category_filter.set_value(["Session Management"])
@@ -92,6 +103,7 @@ def test_library_dashboard_filters_detail_and_human_correction(
     app.run(timeout=15)
 
     next(item for item in app.selectbox if item.label == "Primary category").set_value("Authorization")
+    next(item for item in app.selectbox if item.label == "Relevance").set_value("B")
     next(
         item
         for item in app.text_area
@@ -105,3 +117,77 @@ def test_library_dashboard_filters_detail_and_human_correction(
     assert reviewed["ai_primary_category"] == "Session Management"
     assert reviewed["tags"] == ["Human reviewed tag"]
     assert reviewed["ai_tags"] == ["Session Fixation"]
+
+
+def test_unreviewed_ai_values_are_visible_but_not_saved_as_current(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "unreviewed.db")
+    database.initialize()
+    classification = ClassificationResult(
+        primary_category="Session Management",
+        tags=["Session Fixation"],
+        research_methods=["Empirical Study"],
+        target_vulnerabilities=["Session Fixation"],
+        relevance="A",
+        relevance_reason="AI-only proposal.",
+        relevance_confidence=0.9,
+    )
+    paper_id = database.add_paper(
+        file_hash="e" * 64,
+        filename="unreviewed.pdf",
+        filepath="unreviewed.pdf",
+        metadata=ExtractedMetadata(title="An Unreviewed Paper", year=2024),
+        classification=classification,
+    )
+
+    paper = database.get_paper(paper_id)
+    assert paper["manually_reviewed"] is False
+    assert paper["primary_category"] is None
+    assert paper["relevance"] is None
+    assert paper["tags"] == []
+    assert paper["research_methods"] == []
+    assert paper["target_vulnerabilities"] == []
+    assert paper["effective_primary_category"] == "Session Management"
+    assert paper["effective_tags"] == ["Session Fixation"]
+    assert database.search_papers(categories=["Session Management"])[0]["id"] == paper_id
+    assert database.search_papers(tags=["Session Fixation"])[0]["id"] == paper_id
+    assert database.search_papers(methods=["Empirical Study"])[0]["id"] == paper_id
+    assert database.search_papers(vulnerabilities=["Session Fixation"])[0]["id"] == paper_id
+    assert database.search_papers(relevances=["A"])[0]["id"] == paper_id
+    assert database.list_facets()["tags"] == ["Session Fixation"]
+
+
+def test_full_year_range_keeps_papers_with_unknown_year_visible(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    database_path = tmp_path / "unknown-year.db"
+    database = Database(database_path)
+    database.initialize()
+    for file_hash, filename, year in (
+        ("f" * 64, "known-old.pdf", 2013),
+        ("g" * 64, "known-new.pdf", 2024),
+        ("h" * 64, "unknown-year.pdf", None),
+    ):
+        database.add_paper(
+            file_hash=file_hash,
+            filename=filename,
+            filepath=filename,
+            metadata=ExtractedMetadata(title=f"A Test Paper About {filename}", year=year),
+            classification=None,
+        )
+    monkeypatch.setenv("DATABASE_PATH", str(database_path))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    st.cache_resource.clear()
+
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run(
+        timeout=15
+    )
+    assert not app.exception
+    assert len(app.dataframe[0].value) == 3
+    year_slider = next(item for item in app.slider if item.label == "Publication year")
+    year_slider.set_value((2013, 2013))
+    app.run(timeout=15)
+    assert not app.exception
+    assert len(app.dataframe[0].value) == 1
+    assert app.dataframe[0].value.iloc[0]["Title"] == "A Test Paper About known-old.pdf"

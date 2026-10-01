@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from src.classifier import ClassificationError
 from src.database import Database
 from src.models import ClassificationResult, ExtractedMetadata
 from src.pdf_parser import ParsedPDF
@@ -92,6 +93,41 @@ def test_metadata_failure_does_not_stop_remaining_papers(
     )
     assert [result.status for result in results] == ["Failed", "Classified"]
     assert database.dashboard_counts()["total"] == 1
+
+
+def test_classification_error_is_reported_as_failed_not_pending(
+    tmp_path: Path, database: Database, monkeypatch: object
+) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "paper.pdf").write_bytes(b"%PDF-1.4\ntest")
+    metadata = ExtractedMetadata(
+        title="A Valid Paper About Session Security",
+        abstract=(
+            "This abstract explains the study and reports a reproducible evaluation "
+            "of session security. "
+        )
+        * 2,
+    )
+    monkeypatch.setattr(
+        "src.scanner.parse_pdf", lambda *_: ParsedPDF("text", "title", {}, 1)
+    )
+    monkeypatch.setattr("src.scanner.extract_metadata", lambda *_: metadata)
+
+    class FailingClassifier:
+        def classify(self, **_: object) -> ClassificationResult:
+            raise ClassificationError("OpenAI classification failed (RateLimitError)")
+
+    result = scan_inbox(
+        inbox_dir=inbox,
+        database=database,
+        classifier=FailingClassifier(),
+        logger=logging.getLogger("test"),
+    )
+    stored = database.search_papers()[0]
+    assert result[0].status == "Failed"
+    assert stored["classification_status"] == "failed"
+    assert stored["classification_error"] == "OpenAI classification failed (RateLimitError)"
 
 
 def test_pending_record_can_be_retried_without_overwriting_human_values(

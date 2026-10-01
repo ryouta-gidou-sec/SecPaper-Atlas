@@ -130,10 +130,15 @@ def scan_inbox(
                     processing_seconds=elapsed,
                 )
             if classification_error:
+                result_status = {
+                    ClassificationStatus.NEEDS_REVIEW: "Needs review",
+                    ClassificationStatus.FAILED: "Failed",
+                    ClassificationStatus.PENDING: "Pending",
+                }[classification_status]
                 results.append(
                     ScanResult(
                         path.name,
-                        "Needs review" if classification_status == ClassificationStatus.NEEDS_REVIEW else "Pending",
+                        result_status,
                         classification_error,
                         paper_id,
                         elapsed,

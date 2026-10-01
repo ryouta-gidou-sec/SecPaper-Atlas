@@ -58,10 +58,12 @@ The pipeline is deliberately synchronous and small for a local v0.1. Each paper 
   - multiple target vulnerabilities;
   - relevance A, B, or C with reason and confidence
 - Local SQLite persistence with normalized searchable labels
+- AI predictions remain separate from human values; unreviewed predictions are display/filter fallbacks only
 - Dashboard metrics and category chart
 - Keyword search over title, abstract, tags, and vulnerabilities
 - Filters for category, tags, methods, vulnerabilities, relevance, status, and year
 - Paper detail view and human review of category, tags, methods, vulnerabilities, relevance, reason, and reading status
+- Human correction fields start empty until a person explicitly saves a review
 - Retention of original AI values after manual review
 - Per-paper error handling and rotating local logs
 - Ground-truth CSV and a baseline category-evaluation command

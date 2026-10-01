@@ -50,7 +50,7 @@ sequenceDiagram
     else already classified hash
         Scan-->>UI: Skipped
     end
-    DB-->>UI: Searchable current values + preserved AI values
+    DB-->>UI: Effective values (AI fallback or reviewed current) + preserved AI values
     User->>UI: Save manual review
     UI->>DB: Update current values only
 ```
@@ -72,7 +72,7 @@ Scalar AI/current pairs preserve provenance:
 - `ai_relevance_reason` and `relevance_reason`
 - `ai_relevance_confidence` and `relevance_confidence`
 
-`manually_reviewed` distinguishes untouched AI output from a review. `classification_status` records `pending`, `classified`, `failed`, or `needs_review`; pending and failed records can be retried when scanning the inbox again. A needs-review record is re-extracted and is only sent when its input passes the quality gate. AI retries update original AI fields and preserve current values when a human has already reviewed them. `classification_error` allows extraction results to survive an API or validation failure. Initialization performs additive SQLite migrations for these fields.
+`manually_reviewed` distinguishes untouched AI output from a review. Before the first explicit review, current scalar fields and current label rows remain empty; classification writes only `ai_*` fields and `value_source='ai'` rows. Read and search results expose effective values without persisting a copy: AI values are the display/filter fallback while `manually_reviewed=0`, and current values take over after a review save. AI retries update only AI-owned values and never overwrite current values. Initialization adds missing workflow columns and clears the old AI-to-current projection only for unreviewed rows; reviewed rows and all AI originals are preserved. `classification_status` records `pending`, `classified`, `failed`, or `needs_review`; pending and failed records can be retried when scanning the inbox again. A needs-review record is re-extracted and is only sent when its input passes the quality gate. `classification_error` allows extraction results to survive an API or validation failure.
 
 ### Searchable many-to-many values
 
@@ -82,11 +82,11 @@ papers 1---* paper_methods *---1 research_methods
 papers 1---* paper_vulnerabilities *---1 vulnerabilities
 ```
 
-Each junction row includes `value_source`, either `ai` or `current`. Initial classification creates both sets. Review replaces only current rows. This avoids opaque JSON filtering and supports future AI-versus-human evaluation without destroying history.
+Each junction row includes `value_source`, either `ai` or `current`. Initial classification creates only AI rows. Review creates or replaces current rows. Search, facets, and the dashboard select AI rows for unreviewed papers and current rows for reviewed papers. This avoids opaque JSON filtering and supports future AI-versus-human evaluation without destroying history.
 
 ### Query behavior
 
-All user values are bound parameters. Dynamic table and column identifiers are selected only from an internal constant mapping. Keyword search covers title, abstract, current tags, and current vulnerabilities. Facet filters use current reviewed values and “match any selected value” semantics.
+All user values are bound parameters. Dynamic table and column identifiers are selected only from an internal constant mapping. Keyword search covers title, abstract, effective tags, and effective vulnerabilities. Category, tag, method, vulnerability, and relevance filters plus dashboard counts use AI values until a human review exists, then use current reviewed values. The Human correction form starts empty for unreviewed papers; saving it is the only operation that creates current values and sets `manually_reviewed=1`. Filters use “match any selected value” semantics.
 
 ## AI API boundary
 

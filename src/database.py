@@ -160,6 +160,7 @@ class Database:
             "introduction_excerpt": "TEXT",
             "metadata_review_reasons_json": "TEXT NOT NULL DEFAULT '[]'",
             "classification_status": "TEXT NOT NULL DEFAULT 'pending'",
+            "manually_reviewed": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, declaration in additions.items():
             if name not in columns:
@@ -174,6 +175,28 @@ class Database:
                  AND classification_error IS NOT NULL
                  AND classification_error NOT LIKE '%not configured%'"""
         )
+        # Earlier builds projected untouched AI values into editable fields. Those
+        # rows were not reviewed, so retain their ai_* values and clear the projection.
+        editable_columns = [
+            name
+            for name in (
+                "primary_category",
+                "relevance",
+                "relevance_reason",
+                "relevance_confidence",
+            )
+            if name in columns or name in additions
+        ]
+        if editable_columns:
+            assignments = ", ".join(f"{name} = NULL" for name in editable_columns)
+            connection.execute(
+                f"UPDATE papers SET {assignments} WHERE manually_reviewed = 0"
+            )
+        for _, junction, _ in LABEL_TABLES.values():
+            connection.execute(
+                f"""DELETE FROM {junction} WHERE value_source = 'current'
+                    AND paper_id IN (SELECT id FROM papers WHERE manually_reviewed = 0)"""
+            )
 
     def paper_exists(self, file_hash: str) -> bool:
         with self.connect() as connection:
@@ -201,7 +224,7 @@ class Database:
         classification_status: ClassificationStatus | str | None = None,
         processing_seconds: float | None = None,
     ) -> int:
-        """Insert a paper and both immutable AI and editable current labels."""
+        """Insert AI output while leaving human-reviewed values unset."""
 
         category = classification.primary_category.value if classification else None
         relevance = classification.relevance.value if classification else None
@@ -248,37 +271,36 @@ class Database:
                         json.dumps(metadata.review_reasons, ensure_ascii=False),
                         status,
                         category,
-                        category,
+                        None,
                         relevance,
-                        relevance,
+                        None,
                         reason,
-                        reason,
+                        None,
                         confidence,
-                        confidence,
+                        None,
                         classification_error,
                         processing_seconds,
                     ),
                 )
                 paper_id = int(cursor.lastrowid)
                 if classification:
-                    for source in ("ai", "current"):
-                        self._replace_labels(
-                            connection, paper_id, "tags", classification.tags, source
-                        )
-                        self._replace_labels(
-                            connection,
-                            paper_id,
-                            "research_methods",
-                            classification.research_methods,
-                            source,
-                        )
-                        self._replace_labels(
-                            connection,
-                            paper_id,
-                            "target_vulnerabilities",
-                            classification.target_vulnerabilities,
-                            source,
-                        )
+                    self._replace_labels(
+                        connection, paper_id, "tags", classification.tags, "ai"
+                    )
+                    self._replace_labels(
+                        connection,
+                        paper_id,
+                        "research_methods",
+                        classification.research_methods,
+                        "ai",
+                    )
+                    self._replace_labels(
+                        connection,
+                        paper_id,
+                        "target_vulnerabilities",
+                        classification.target_vulnerabilities,
+                        "ai",
+                    )
                 return paper_id
         except sqlite3.IntegrityError as exc:
             if "file_hash" in str(exc):
@@ -366,27 +388,8 @@ class Database:
                 classification.target_vulnerabilities,
                 "ai",
             )
-            if not row["manually_reviewed"]:
-                connection.execute(
-                    """UPDATE papers SET primary_category = ?, relevance = ?, relevance_reason = ?,
-                       relevance_confidence = ? WHERE id = ?""",
-                    (category, relevance, reason, confidence, paper_id),
-                )
-                self._replace_labels(connection, paper_id, "tags", classification.tags, "current")
-                self._replace_labels(
-                    connection,
-                    paper_id,
-                    "research_methods",
-                    classification.research_methods,
-                    "current",
-                )
-                self._replace_labels(
-                    connection,
-                    paper_id,
-                    "target_vulnerabilities",
-                    classification.target_vulnerabilities,
-                    "current",
-                )
+            # A retry replaces AI-owned values only. It never seeds or overwrites
+            # the human-owned current values, regardless of review status.
 
     def get_paper(self, paper_id: int) -> dict[str, Any] | None:
         with self.connect() as connection:
@@ -420,21 +423,35 @@ class Database:
                     OR lower(COALESCE(p.abstract, '')) LIKE ?
                     OR EXISTS (
                         SELECT 1 FROM paper_tags pt JOIN tags t ON t.id = pt.tag_id
-                        WHERE pt.paper_id = p.id AND pt.value_source = 'current'
+                        WHERE pt.paper_id = p.id
+                          AND pt.value_source = CASE WHEN p.manually_reviewed = 1
+                              THEN 'current' ELSE 'ai' END
                           AND lower(t.name) LIKE ?
                     )
                     OR EXISTS (
                         SELECT 1 FROM paper_vulnerabilities pv
                         JOIN vulnerabilities v ON v.id = pv.vulnerability_id
-                        WHERE pv.paper_id = p.id AND pv.value_source = 'current'
+                        WHERE pv.paper_id = p.id
+                          AND pv.value_source = CASE WHEN p.manually_reviewed = 1
+                              THEN 'current' ELSE 'ai' END
                           AND lower(v.name) LIKE ?
                     )
                 )"""
             )
             parameters.extend([pattern] * 4)
 
-        self._add_in_filter(clauses, parameters, "p.primary_category", categories)
-        self._add_in_filter(clauses, parameters, "p.relevance", relevances)
+        self._add_in_filter(
+            clauses,
+            parameters,
+            "CASE WHEN p.manually_reviewed = 1 THEN p.primary_category ELSE p.ai_primary_category END",
+            categories,
+        )
+        self._add_in_filter(
+            clauses,
+            parameters,
+            "CASE WHEN p.manually_reviewed = 1 THEN p.relevance ELSE p.ai_relevance END",
+            relevances,
+        )
         self._add_in_filter(clauses, parameters, "p.status", statuses)
         self._add_in_filter(
             clauses, parameters, "p.classification_status", classification_statuses
@@ -454,7 +471,9 @@ class Database:
         sql = f"""
             SELECT p.* FROM papers p
             WHERE {' AND '.join(clauses)}
-            ORDER BY CASE p.relevance WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 ELSE 4 END,
+            ORDER BY CASE
+                         CASE WHEN p.manually_reviewed = 1 THEN p.relevance ELSE p.ai_relevance END
+                         WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 ELSE 4 END,
                      p.year DESC, lower(COALESCE(p.title, p.filename))
         """
         with self.connect() as connection:
@@ -526,12 +545,23 @@ class Database:
                 "SELECT count(*) FROM papers WHERE status = 'Unread'"
             ).fetchone()[0]
             category_rows = connection.execute(
-                """SELECT COALESCE(primary_category, 'Unclassified') AS label, count(*) AS count
-                   FROM papers GROUP BY primary_category ORDER BY count DESC"""
+                """SELECT COALESCE(
+                       CASE WHEN manually_reviewed = 1 THEN primary_category
+                            ELSE ai_primary_category END, 'Unclassified') AS label,
+                       count(*) AS count
+                   FROM papers
+                   GROUP BY CASE WHEN manually_reviewed = 1 THEN primary_category
+                                 ELSE ai_primary_category END
+                   ORDER BY count DESC"""
             ).fetchall()
             relevance_rows = connection.execute(
-                """SELECT COALESCE(relevance, 'Unclassified') AS label, count(*) AS count
-                   FROM papers GROUP BY relevance ORDER BY label"""
+                """SELECT COALESCE(
+                       CASE WHEN manually_reviewed = 1 THEN relevance ELSE ai_relevance END,
+                       'Unclassified') AS label,
+                       count(*) AS count
+                   FROM papers
+                   GROUP BY CASE WHEN manually_reviewed = 1 THEN relevance ELSE ai_relevance END
+                   ORDER BY label"""
             ).fetchall()
         return {
             "total": total,
@@ -548,7 +578,9 @@ class Database:
                     for row in connection.execute(
                         f"""SELECT DISTINCT l.name
                             FROM {table} l JOIN {junction} j ON j.{foreign_key} = l.id
-                            WHERE j.value_source = 'current'
+                            JOIN papers p ON p.id = j.paper_id
+                            WHERE j.value_source = CASE WHEN p.manually_reviewed = 1
+                                THEN 'current' ELSE 'ai' END
                             ORDER BY lower(l.name)"""
                     ).fetchall()
                 ]
@@ -581,7 +613,8 @@ class Database:
         clauses.append(
             f"""EXISTS (
                 SELECT 1 FROM {junction} j JOIN {table} l ON l.id = j.{foreign_key}
-                WHERE j.paper_id = p.id AND j.value_source = 'current'
+                WHERE j.paper_id = p.id
+                  AND j.value_source = CASE WHEN p.manually_reviewed = 1 THEN 'current' ELSE 'ai' END
                   AND l.name IN ({placeholders})
             )"""
         )
@@ -630,6 +663,28 @@ class Database:
             paper[key] = self._get_labels(connection, paper["id"], key, "current")
             paper[f"ai_{key}"] = self._get_labels(connection, paper["id"], key, "ai")
         paper["manually_reviewed"] = bool(paper["manually_reviewed"])
+        paper["effective_primary_category"] = (
+            paper["primary_category"]
+            if paper["manually_reviewed"]
+            else paper["ai_primary_category"]
+        )
+        paper["effective_relevance"] = (
+            paper["relevance"] if paper["manually_reviewed"] else paper["ai_relevance"]
+        )
+        paper["effective_relevance_reason"] = (
+            paper["relevance_reason"]
+            if paper["manually_reviewed"]
+            else paper["ai_relevance_reason"]
+        )
+        paper["effective_relevance_confidence"] = (
+            paper["relevance_confidence"]
+            if paper["manually_reviewed"]
+            else paper["ai_relevance_confidence"]
+        )
+        for key in LABEL_TABLES:
+            paper[f"effective_{key}"] = (
+                paper[key] if paper["manually_reviewed"] else paper[f"ai_{key}"]
+            )
         return paper
 
     @staticmethod
