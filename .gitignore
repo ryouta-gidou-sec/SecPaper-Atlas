@@ -4,13 +4,15 @@
 !.env.example
 
 # Source papers and personal data
-papers/inbox/*.pdf
-papers/inbox/**/*.pdf
-data/*.db
-data/*.db-*
-data/*.sqlite
-data/*.sqlite-*
-data/ground_truth.local.csv
+papers/*
+!papers/inbox/
+papers/inbox/*
+!papers/inbox/.gitkeep
+*.[pP][dD][fF]
+data/*
+!data/.gitkeep
+# Public schema template only; keep real evaluation rows in ignored local copies.
+!data/ground_truth.csv
 logs/*
 !logs/.gitkeep
 *.db
@@ -20,6 +22,7 @@ logs/*
 *.sqlite3
 *.sqlite3-*
 *.log
+*.log.*
 
 # Streamlit local secrets and caches (keep .streamlit/config.toml)
 .streamlit/secrets.toml

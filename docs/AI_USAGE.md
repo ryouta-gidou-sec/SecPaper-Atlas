@@ -45,6 +45,14 @@ Humans should decide:
 - whether evidence is strong enough to cite or rely on;
 - whether a paper and any sensitive notes may be shared.
 
+## Ground truth and evaluation
+
+Human Review is an application workflow for correcting a paper's current values. Evaluation Ground Truth is a separate human reference, assigned using a fixed rubric and evidence scope before comparing it with AI predictions. Saving a review does not automatically establish independent Ground Truth, and AI values must never be copied into reference labels without human judgment.
+
+The public `data/ground_truth.csv` contains column headers only. Real reference labels and evaluation working files stay in ignored local storage. The CSV evaluation command reads explicitly prepared category labels; the database comparison command uses explicitly saved Human Review categories, whose independence must be assessed separately.
+
+The v0.1.1 results are an eight-paper pilot covering three categories. Prompt adjustments used those same papers, so the later comparison is a development-set comparison. Tags, methods and relevance remain problematic; confidence is a model self-report, not a calibrated probability. See [EVALUATION.md](EVALUATION.md), [EVALUATION_RUBRIC.md](EVALUATION_RUBRIC.md) and [EVALUATION_RESULTS.md](EVALUATION_RESULTS.md).
+
 ## What AI does not do in v0.1
 
 AI does not translate full papers, generate research gaps, recommend papers, make academic-quality judgments, edit PDFs, browse paper websites, download files, or move files. It also does not override human-reviewed values.

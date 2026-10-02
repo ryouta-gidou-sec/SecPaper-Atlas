@@ -1,6 +1,6 @@
 # v0.1.1 Evaluation Results
 
-記録日: 2026-10-03（Asia/Tokyo）。04｜v0.1.1のPrompt tuningは終了。Baseline、Prompt改善①、Final Promptを固定した8本で比較した最終結果を記録する。これ以上classifier Promptは変更しない。
+記録日: 2026-10-03（Asia/Tokyo）。v0.1.1のPrompt tuningは終了。Baseline、Prompt改善①、Final Promptを固定した8本で比較した最終結果を記録する。
 
 ## 評価条件
 
@@ -136,7 +136,7 @@ AUTHSCANのPrimary Categoryは、BaselineのAuthentication → Prompt改善①�
 
 個別のAI原値、Human値、正規化後の差分、入力payload hash、保全監査は、Gitから除外される`logs/v011-prompt-tuning/`と`logs/v011-primary-comparison/`に保存した。①の記録にはモデルdigestも含む。実行・集計用の一回限りの補助scriptも`logs/`内にあり、アプリ機能や既存の`evaluate.py`を拡張していない。研究データやDBを成果物のcommit対象に含めない。
 
-依頼された変更・テスト・再分類・比較・文書化は完了。Primary Category regressionの修正を確認し、04｜v0.1.1最終調整を終了する。multi-labelとRelevanceの課題を明記し、8本の結果から一般的なリリース品質やモデル性能を保証しない。mainへのmerge、v0.1.1 tag、remote追加、pushは行わない。
+Primary Category regressionの修正を確認し、v0.1.1の評価・最終調整を完了した。multi-labelとRelevanceの課題は残り、8本の結果から一般的なリリース品質やモデル性能を保証しない。その後mainへ統合し、v0.1.1をローカル完成版としてタグ付けした。GitHub公開操作は未実施。
 
 ## カテゴリ分布と解釈の限界
 

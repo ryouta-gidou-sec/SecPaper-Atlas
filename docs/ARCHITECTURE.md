@@ -2,7 +2,7 @@
 
 ## Design goals
 
-Version 0.1 is a local, inspectable classification pipeline rather than a general research platform. It prioritizes source-PDF integrity, deterministic duplicate handling, minimal data disclosure, recoverable AI failures, and explicit human authority over classifications.
+Version 0.1.1 is a local, inspectable classification pipeline. It prioritizes source-PDF integrity, deterministic duplicate handling, minimal data disclosure, recoverable AI failures, and explicit human authority over classifications.
 
 ## Components
 
@@ -16,7 +16,7 @@ Version 0.1 is a local, inspectable classification pipeline rather than a genera
 | `src/database.py` | Own schema, transactions, bound SQL, search, and human-review updates | Persists private local research data |
 | `src/scanner.py` | Orchestrate stages and isolate failures per paper | Does not mutate input files |
 | `app.py` | Present dashboard, filters, detail, scan controls, and review form | User-facing local interface |
-| `scripts/evaluate.py` | Compare reviewed ground truth with AI primary-category output | Reads an explicitly prepared local CSV |
+| `scripts/evaluate.py` | Compare human labels with AI primary-category output and report accuracy / per-category metrics | Reads an explicitly prepared local CSV or successful run history and Human Review categories from SQLite in read-only mode |
 
 ## Data flow
 
@@ -139,7 +139,7 @@ Nullable papers columns `classification_provider` (local/openai), `classificatio
 
 New `classification_runs` rows retain provider/model, validated result JSON or sanitized failure, UTC classification time for successes, and creation time. Run insertion, latest AI update and labels share a transaction. Retries replace the latest AI projection but retain all previous originals in history; Human Review never edits that history or gets overwritten by retries. Existing AI rows are snapshotted once, with unknown historical provider/model/date left null. Old failures keep their diagnostics without invented provenance. Migration is idempotent.
 
-Normal scans skip classified hashes regardless of provider changes. Explicit `reclassify=True` enables deliberate comparison runs. Evaluation reads successful history and current human labels read-only, groups by provider/model, and uses the latest success per hash per group. The original CSV metrics remain available.
+Normal scans skip classified hashes regardless of provider changes. Explicit `reclassify=True` enables deliberate comparison runs. Evaluation reads successful history and current human labels read-only, groups by provider/model, and uses the latest success per hash per group. The original CSV metrics remain available. Human Review categories are not automatically independent Ground Truth; evaluation references require a fixed rubric and separate human judgment. The multi-field v0.1.1 pilot in [EVALUATION_RESULTS.md](EVALUATION_RESULTS.md) used local helper scripts; the public CLI evaluates primary category only.
 
 ## PDF processing and source integrity
 

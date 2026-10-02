@@ -1,230 +1,135 @@
-# Research Paper Classifier
+# SecPaper Atlas
 
-A local-first Streamlit application that turns a folder of cybersecurity research PDFs into a searchable, reviewable literature library. Version 0.1 focuses on authentication, session management, authorization, token security, and vulnerability assessment papers.
+セキュリティ研究論文のPDFをローカルで解析し、メタデータ抽出・AI分類・検索・Human Review・評価を行う研究支援ツール。
 
-> **Project status:** v0.1. Source PDFs stay untouched; only extracted metadata and classification results are stored in a local SQLite database.
+**v0.1.1 — ローカル完成版。** デフォルトの分類はOllama / `qwen3:4b`を使用する。元PDFを変更せず、AIの予測と人間のレビュー値を分離して保存する。
 
-## Overview
+## Features
 
-Drop PDFs into `papers/inbox/`, start the app, and select **Scan papers/inbox**. The application detects new files by SHA-256, extracts metadata with PyMuPDF, classifies minimal input with a local Ollama model by default, validates structured results with Pydantic, and stores them in SQLite. OpenAI Structured Outputs remain an optional backend. The dashboard supports keyword search, filters, and human review.
+- **PDF extraction:** PyMuPDFでタイトル・著者・年・Abstract・Keywordsを抽出。抽出品質に問題がある入力は分類前にレビュー待ちにする。
+- **Duplicate detection:** SHA-256で内容が同じPDFの重複登録を防ぐ。
+- **Local LLM classification:** Ollama / `qwen3:4b`で8カテゴリ、Tags、Methods、Target Vulnerabilities、Relevanceを提案する。
+- **Structured JSON + Pydantic validation:** 共通スキーマで出力を検証し、不正な応答を保存可能な分類結果として扱わない。
+- **SQLite + Streamlit dashboard:** 論文一覧・詳細・件数・カテゴリ分布を表示し、キーワード検索とカテゴリ・タグ・手法・脆弱性・Relevance・状態・年のフィルタを提供する。
+- **Human Review:** AI predictionとHuman値を別々に保持。明示的なレビュー保存でHuman値を作成し、再分類でも人間の修正と過去のAI出力を保持する。
+- **Evaluation:** CSVまたは保存済みprovider/model別の分類履歴をHumanラベルと比較するPrimary Category評価CLI。
+- **Optional OpenAI provider:** 明示的に選択した場合だけ、限定した論文情報を外部APIへ送信する。
 
-## Background
+## Why I Built This
 
-This project was created while exploring a cybersecurity graduation-research topic. A growing collection of English papers about authentication and authorization became difficult to organize manually: papers overlap multiple areas, methods are hard to compare across folders, and the papers most relevant to session-security research are not always obvious from filenames.
-
-## Problems
-
-- A folder hierarchy forces each paper into only one location even when it spans several topics.
-- Filenames do not expose research methods or target vulnerabilities.
-- Manual tagging is slow and inconsistent across a growing library.
-- AI classification can be useful, but an opaque or irreversible AI decision is unsuitable for research work.
-
-## Solution
-
-Research Paper Classifier combines deterministic local processing with reviewable AI assistance:
-
-1. Files are identified by content hash, not filename.
-2. PDF properties and extracted text provide title, authors, year, abstract, and keywords when available.
-3. Only title, abstract, keywords, and—when the abstract is missing—a bounded introduction excerpt reach the selected classifier.
-4. Both providers share the classification schema and Pydantic validation.
-5. Original AI values and user-edited values are stored separately.
-6. Normalized label tables make tags, methods, and vulnerabilities filterable.
+研究テーマ候補や関連するセキュリティ論文を整理する際、論文数の増加に伴って手作業の分野分類や関連研究の優先順位付けが難しくなった。ファイル名だけでは研究対象・手法・脆弱性が分からないため、AIが分類案を出し、人間が根拠を確認して整理できるライブラリを作成した。
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    A[PDF in papers/inbox] -->|read only| B[PyMuPDF parser]
-    B --> C[Metadata extractor]
-    C -->|quality gate + minimal fields| P{Provider setting}
-    P -->|local default| L[Ollama on this PC]
-    P -->|openai opt-in| D[OpenAI Structured Outputs]
-    L --> E[Pydantic validation]
-    D --> E[Pydantic validation]
-    E --> F[(SQLite)]
-    C -->|provider unavailable or error| F
-    F --> G[Streamlit dashboard]
-    G -->|human review| F
+    A[PDF: read only] --> B[Metadata Extraction]
+    B -->|quality gate / minimal fields| C{Classifier Provider}
+    C -->|default| D[Local Ollama]
+    C -->|opt-in| E[OpenAI]
+    D --> F[Pydantic Validation]
+    E --> F
+    F --> G[(SQLite)]
+    G --> H[Streamlit]
+    H --> I[Human Review]
+    I -->|Human values only| G
+    G --> J[Evaluation CLI]
 ```
 
-The pipeline is deliberately synchronous and small for a local v0.1. Each paper is transactionally stored, and a failure processing one PDF does not end the whole scan. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the schema and trust boundaries.
+抽出・分類・保存・UIを分離し、PDFごとに失敗を処理する。SQLiteは値をパラメータ化して扱い、正規化したラベル表で検索する。分類履歴にAI原値とprovider/modelを保持し、Human Reviewでは人間用の値だけを更新する。詳細は[Architecture](docs/ARCHITECTURE.md)を参照。
 
-## Features
+## Classification Categories
 
-- Read-only PDF discovery with path containment and PDF-signature checks
-- Streaming SHA-256 hashing and duplicate prevention
-- Conservative metadata and abstract extraction
-- Schema-constrained AI classification into:
-  - one primary category;
-  - multiple tags;
-  - multiple research methods;
-  - multiple target vulnerabilities;
-  - relevance A, B, or C with reason and confidence
-- Local SQLite persistence with normalized searchable labels
-- Provider/model/timestamp provenance and retained classification history
-- Current provider/model in the sidebar and saved provenance in paper details
-- AI predictions remain separate from human values; unreviewed predictions are display/filter fallbacks only
-- Dashboard metrics and category chart
-- Keyword search over title, abstract, tags, and vulnerabilities
-- Filters for category, tags, methods, vulnerabilities, relevance, status, and year
-- Paper detail view and human review of category, tags, methods, vulnerabilities, relevance, reason, and reading status
-- Human correction fields start empty until a person explicitly saves a review
-- Retention of original AI values after manual review
-- Per-paper error handling and rotating local logs
-- Ground-truth CSV and a baseline category-evaluation command
+- Authentication
+- Session Management
+- Authorization
+- Token Security
+- OAuth / OIDC / SSO
+- Account Management
+- Vulnerability Assessment
+- Other Security
 
-## Project layout
-
-```text
-.
-├── app.py
-├── papers/inbox/          # user PDFs (ignored by Git)
-├── data/                  # local SQLite DB and evaluation CSV
-├── logs/                  # local rotating logs
-├── scripts/evaluate.py
-├── src/
-│   ├── classifier.py
-│   ├── ollama_classifier.py
-│   ├── config.py
-│   ├── database.py
-│   ├── metadata_extractor.py
-│   ├── models.py
-│   ├── pdf_parser.py
-│   └── scanner.py
-├── tests/
-└── docs/
-```
-
-This layout keeps the Streamlit entry point obvious while separating extraction, AI, orchestration, and persistence into testable modules. It also keeps private runtime artifacts outside source directories.
-
-## Installation on Windows
-
-Prerequisites: Python 3.10 or newer. Local classification requires Ollama and an explicitly downloaded local model. An OpenAI API key is optional.
-
-```powershell
-git clone <repository-url>
-cd SecPaper-Atlas
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-if (-not (Test-Path -LiteralPath .env)) { Copy-Item .env.example .env }
-```
-
-Edit `.env` using the settings below; preserve any existing private settings. The app performs no installation or model download. See [docs/LOCAL_LLM.md](docs/LOCAL_LLM.md) for the proposed Windows setup.
-
-### Classifier settings
-
-```dotenv
-CLASSIFIER_PROVIDER=local
-LOCAL_LLM_MODEL=qwen3:4b
-LOCAL_LLM_BASE_URL=http://127.0.0.1:11434
-LOCAL_LLM_TIMEOUT=180
-LOCAL_LLM_VALIDATION_RETRIES=1
-```
-
-`local` is the default provider. The local model name has no code default and must name an installed model. Ollama receives the common JSON Schema. All fields are required and strictly validated. Invalid JSON/schema permits at most one regeneration; connection, timeout, missing-model and HTTP errors fail immediately. Malformed answers are not repaired or treated as valid.
-
-**Local Providerでは論文情報がPC外へ送信されない。** Only HTTP loopback endpoints are permitted. The client ignores proxies, rejects redirects/cloud model references, and confirms installed local model metadata before submitting paper text. Set `OLLAMA_NO_CLOUD=1` in the Ollama server environment and restart Ollama; loading the app's `.env` does not reconfigure an existing server. Model downloads and Ollama updates are separate network operations that do not carry paper inputs.
-
-For optional external classification, set `CLASSIFIER_PROVIDER=openai`, `OPENAI_API_KEY`, and `OPENAI_MODEL`. Only this selection creates an OpenAI client and sends input externally. There is no automatic fallback to OpenAI. SDK transport retries are disabled and requests have a 60-second timeout.
-
-## Usage
-
-1. Copy one or more PDFs into `papers/inbox/`. Nested folders are supported.
-2. Start the local app:
-
-   ```powershell
-   streamlit run app.py
-   ```
-
-3. Select **Scan papers/inbox**.
-4. Review the per-paper result summary.
-5. Search and filter the library, then open a paper to correct its editable classification.
-
-If the selected classifier is unconfigured, extraction still runs and new papers are saved as pending. A configured but unavailable server/model or invalid response produces failed records. Scanning again retries pending, failed and needs_review records without inserting duplicate hashes. Classified records are skipped even after a provider/model change; intentional comparison runs can use `scan_inbox(..., reclassify=True)`. Metadata that fails the gate remains needs_review. Source PDFs stay untouched.
-
-## Processing time
-
-`papers.processing_seconds` records the latest non-skipped scan attempt's elapsed
-seconds, from hash/duplicate checks through PDF parsing, extraction, input gating
-and classifier generation/validation. It includes bounded validation retries but
-excludes subsequent DB writes, result logging and UI rendering. It is not AI-only
-latency. Both new scans and retries save the current value, including failed or
-review-held attempts; skipped papers keep their previous value. Classification
-history retains earlier AI results, while this column holds only the latest attempt's
-duration. Existing databases need no schema migration.
-
-## Classification model
-
-### Primary categories
-
-`Authentication`, `Session Management`, `Authorization`, `Token Security`, `OAuth / OIDC / SSO`, `Account Management`, `Vulnerability Assessment`, and `Other Security`.
-
-### Tags, methods, and vulnerabilities
-
-Tags describe topics such as MFA, cookies, IDOR, JWT, OAuth, or browser automation. Research methods describe how the work was conducted. Target vulnerabilities describe the security weaknesses or attacks being studied. These fields are many-to-many and searchable. The initial vocabulary guides the AI, while custom tags remain possible during review.
-
-### Relevance
-
-- **A:** directly aligned with the current topic search, especially session security combined with vulnerability assessment or automated/black-box techniques.
-- **B:** useful authentication, authorization, token, OAuth/OIDC, or access-control research.
-- **C:** security research that is comparatively distant from the current topic search.
-
-Relevance is not a judgment of research quality.
-
-## Security considerations
-
-- API keys are loaded from `.env`, never hard-coded, and `.env` is ignored by Git.
-- PDFs, local databases, ground-truth working files, and logs are ignored by default.
-- Inbox files are opened read-only. The application does not rename, move, edit, execute, or automatically download PDFs.
-- Candidate paths must resolve inside the configured inbox, reducing traversal and symlink-escape risk.
-- A `.pdf` suffix alone is insufficient; the PDF magic bytes and PyMuPDF parsing must also succeed.
-- SQLite values use bound parameters. Dynamic SQL identifiers come only from internal constant mappings.
-- Logs contain filenames, short hash prefixes, statuses, and error types—not API keys, prompts, abstracts, or paper bodies.
-- AI receives bounded extracted text, not the complete PDF.
-
-PDF parsers process untrusted, complex files. Run the app with normal user privileges, keep dependencies patched, and avoid opening unknown PDFs in unrelated viewers simply because the app detected them.
-
-## Tests
-
-```powershell
-pytest
-```
-
-The suite covers extraction, hashing, database/search/migrations, strict JSON validation, mocked local/OpenAI failures, provider selection, local privacy boundaries, retries, review preservation and evaluation. Tests do not download models, start an LLM server, require a key or spend credits.
+Relevance A / B / Cはセッション安全性を中心とする研究関心との関連度であり、論文の品質評価ではない。
 
 ## Evaluation
 
-Copy reviewed examples into `data/ground_truth.csv` using its existing columns, then run:
+v0.1.1では`qwen3:4b`の保存済み分類と、人間がRubric v1に基づいて作成したGround Truthを比較した。
+
+| 指標（一致件数 / 8） | Baseline | Final Prompt |
+|---|---:|---:|
+| Primary Category | 8/8 | 8/8 |
+| Relevance | 4/8 | 4/8 |
+| Tags: exact match | 0/8 | 0/8 |
+| Methods: exact match | 0/8 | 0/8 |
+| Target Vulnerabilities: exact match | 2/8 | 6/8 |
+
+Baselineは**8本のみのpilot evaluation**。出現CategoryはAuthentication（1本）、Session Management（4本）、Vulnerability Assessment（3本）の3種類で、他の5カテゴリは未評価。これは`qwen3:4b`の一般性能を示す結果ではない。
+
+同じ8本の誤りを使ってPromptを調整したため、Finalとの比較は**development-set comparison**であり、独立したtest setの評価ではない。Target Vulnerabilitiesの完全一致は増えたが、Tags / Methods / Relevanceには課題が残る。Confidenceはモデルの自己申告値で、校正済み確率ではない。
+
+多項目の集計はローカルの評価用補助スクリプトで実施した。公開CLIの実装範囲はPrimary Category評価。評価条件・途中の変動・限界は[Evaluation Results](docs/EVALUATION_RESULTS.md)、手順は[Evaluation](docs/EVALUATION.md)、判断基準は[Evaluation Rubric](docs/EVALUATION_RUBRIC.md)に記録している。個別のGround Truthと作業ファイルは公開対象外。
+
+## Local-first / Privacy
+
+- デフォルトはOllamaによるローカル分類。論文内容を外部APIへ送らずに利用できる。
+- ローカルproviderはloopbackのみを許可し、proxy設定を使用せず、redirect・cloud model参照を拒否する。Ollamaサーバーのcloud機能も無効化して利用する。
+- OpenAI providerはoptional。送信対象は抽出したtitle・abstract・keywords、およびAbstract欠落時だけの短いIntroduction excerptに限定し、PDFや全文は送らない。自動的なOpenAIへの切り替えは行わない。
+- API KeyはGitから除外する`.env`で管理する。`.env.example`はSecretを含まない設定例。
+- PDF・実DB・logs・ローカル評価データはGit管理対象外。元PDFは読み取り専用で扱う。
+
+ソフトウェア導入・モデルのダウンロード・更新は別途ネットワークを使用する。
+
+## AI Usage
+
+**AI分類**は提案、**Human Review**は利用者による修正、**Ground Truth**は固定したRubricに基づく独立した人間の参照ラベル、**評価**は両者の比較として区別する。Human Reviewを自動的にGround Truthとして確定しない。開発時のCodex支援も含め、[AI Usage](docs/AI_USAGE.md)に役割と検証方針を記載している。
+
+## Tech Stack
+
+Python · Streamlit · SQLite · PyMuPDF · Pydantic · Ollama · `qwen3:4b` · pytest（optional: OpenAI Python SDK）
+
+## Setup
+
+Windows / PowerShellでの手順。Python 3.10以上（テスト環境は3.12）と[Ollama](https://ollama.com/download)を用意する。
+
+1. リポジトリをcloneまたはZIP展開し、プロジェクトのルートでPowerShellを開く。
+
+   ```powershell
+   py -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+   if (-not (Test-Path -LiteralPath .env)) { Copy-Item .env.example .env }
+   ```
+
+2. Ollamaをインストールした後、タスクトレイから終了する。Windowsのユーザー環境変数に`OLLAMA_NO_CLOUD=1`、`OLLAMA_HOST=127.0.0.1:11434`を設定し、Ollamaを再起動する。[公式の環境変数設定手順](https://docs.ollama.com/faq#setting-environment-variables-on-windows)を参照。アプリの`.env`だけではOllamaサーバーの設定は変わらない。
+
+3. 新しいPowerShellをルートで開き、モデルを明示的に取得する。
+
+   ```powershell
+   ollama pull qwen3:4b
+   ollama list
+   ```
+
+4. `.env`の`CLASSIFIER_PROVIDER=local`、`LOCAL_LLM_MODEL=qwen3:4b`、`LOCAL_LLM_BASE_URL=http://127.0.0.1:11434`を確認する。モデル名にはコード上のデフォルトがないため、設定が必要。
+
+5. 手元のPDFを`papers/inbox/`へコピーし、アプリを起動する。
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m streamlit run app.py
+   ```
+
+6. ブラウザで表示されたダッシュボードの**Scan papers/inbox**を選択する。結果を確認し、検索・フィルタ・論文詳細の**Human correction**からレビューする。
+
+DBは`data/papers.db`、ログは`logs/`へ自動作成する。未設定の分類器では抽出のみを行いpendingとして保存し、接続・モデル・応答の問題ではfailedとなる。再スキャンで未分類や失敗を再試行し、分類済みの同一hashはスキップする。導入とトラブル対応は[Local LLM](docs/LOCAL_LLM.md)を参照。
+
+OpenAIを使う場合は`.env`で`CLASSIFIER_PROVIDER=openai`と`OPENAI_API_KEY`、`OPENAI_MODEL`を設定する。
+
+## Testing
 
 ```powershell
-python scripts/evaluate.py data/ground_truth.csv
+.\.venv\Scripts\python.exe -m pytest
 ```
 
-The v0.1 script reports primary-category accuracy plus per-category precision, recall, F1, and support. See [docs/EVALUATION.md](docs/EVALUATION.md) for sampling guidance and planned metadata/latency metrics.
+**v0.1.1時点で130 tests passed。** 抽出、重複検出、DB検索、JSON検証、providerの失敗処理、ローカル通信境界、AI/Human分離、再試行、評価をテストする。provider通信はmockを使用し、API Key・モデル取得・実LLM推論は不要。件数は今後の変更で増減する。
 
-Compare saved provider/model runs with explicitly saved Human Review labels:
+## Project Status
 
-```powershell
-python scripts/evaluate.py --database data/papers.db
-```
-
-The comparison uses the latest successful run per PDF hash in each provider/model group. Failed and unreviewed records are excluded; human labels are never copied automatically from AI.
-
-## AI use and transparency
-
-Codex assisted with implementation. The application uses local Ollama by default and OpenAI only when selected. AI output is schema-validated, visibly editable, retained separately from human values and never treated as ground truth. See [docs/AI_USAGE.md](docs/AI_USAGE.md).
-
-## Limitations
-
-- PDF layouts vary; scanned/image-only files require OCR, which v0.1 does not implement.
-- Metadata extraction uses page layout and bounded heading recognition, but layouts vary and extracted values still need human review.
-- Classification quality depends on the extracted abstract and selected model.
-- Filtering multiple values within one facet currently uses “match any” semantics.
-- Previously saved pending and failed classifications can be retried by scanning the inbox; records with unresolved metadata issues remain held for review.
-- SQLite and synchronous scanning target one local user, not a multi-user deployment.
-
-## Future work
-
-After classification quality is measured, possible later releases may add full-text translation, semantic search, similar-paper recommendations, citation networks, research-gap analysis, and ChatGPT Project integration. These are intentionally outside v0.1.
+**v0.1.1: ローカル完成版。** 分類とライブラリ閲覧に範囲を絞った、単一利用者向けのアプリ。OCRと複数利用者向け運用は未実装で、抽出結果とAI判断は人間の確認を前提とする。評価対象の少なさと分類項目ごとの残る課題を、上記の評価と関連文書で公開している。

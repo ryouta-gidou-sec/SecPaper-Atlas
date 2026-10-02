@@ -10,6 +10,8 @@
 | 中心評価 | v0.1.1のPrimary Category Accuracy |
 | 対象 | 保存済みLocal LLM（qwen3:4b）の8本を、人間が独立にレビューするための基準 |
 
+本書の作業状況やChecklistは2026-10-02のRubric作成時点（Baseline、Human Review前）の記録である。以後のレビュー完了とFinal Promptの結果は[EVALUATION_RESULTS.md](EVALUATION_RESULTS.md)を参照する。判断基準と`normalization-v1`の定義は維持する。
+
 この文書は評価基準を定義する。各論文の正解ラベルを決定したり、Human Ground Truthを入力したりするものではない。末尾のChecklistも確認事項であり、正解一覧ではない。AI Prediction、AI理由、Confidenceは人間の判断根拠にしない。
 
 既存の一般的な評価手順は[EVALUATION.md](EVALUATION.md)を参照する。今回の8本の判断基準、完了条件、正規化は本書に従う。コード、Prompt、保存構造、分類結果は変更しない。
@@ -209,7 +211,7 @@ Primary CategoryとRelevanceは列挙値の前後空白だけを取り、正確�
 
 ## 8. Confidence
 
-`ai_relevance_confidence`はLLMが自己申告した補助値であり、実測Accuracyでも校正済み確率でもない。現在の8件はすべて`0.95`だが、それだけでは正誤も信頼性も判定できない。
+`ai_relevance_confidence`はLLMが自己申告した補助値であり、実測Accuracyでも校正済み確率でもない。Rubric作成時のBaseline 8件はすべて`0.95`だったが、それだけでは正誤も信頼性も判定できない。Final Promptまでの分布は[EVALUATION_RESULTS.md](EVALUATION_RESULTS.md)を参照する。
 
 - Ground Truth判定、review_status、評価対象の採否に使用しない。
 - Correct / Incorrectの代わりにしない。Accuracyの分母や重みに使わない。
@@ -250,7 +252,7 @@ Primary CategoryとRelevanceは列挙値の前後空白だけを取り、正確�
 
 この完了条件は**評価フォーマットの仕様**であり、既存UIの`manually_reviewed`の検証実装がすべてを強制するという意味ではない。今回UI保存やCSV／xlsx／DBの同期は行わない。将来の入力時は両形式に食い違いがあれば人間が解消するまで評価から除外し、AI列を同期のために書き換えない。
 
-今回確認したCSVは8行、全Humanラベル空欄、全件Unreviewed。`human-ground-truth.xlsx`はproject内で確認できていないため、実際のsheet構成や入力検証を確認したとは扱わない。
+本書作成時に確認したCSVは8行、全Humanラベル空欄、全件Unreviewedだった。その時点では`human-ground-truth.xlsx`をproject内で確認できておらず、sheet構成や入力検証を確認したとは扱わない。レビュー完了後の状態は結果文書に記録している。
 
 ## 10. Evaluation metricsと既存コードとの接続
 
@@ -268,7 +270,7 @@ Primary CategoryとRelevanceは列挙値の前後空白だけを取り、正確�
 
 AccuracyのN=0は未定義（既存コードの`None`）。ゼロ除算になるクラスのPrecision／Recall／F1は、既存コードに合わせ0で出すが、supportや予測件数が0であることを併記し、クラス性能が観測されたと解釈しない。全8分類を表示する場合、未出現クラスのsupport=0は「性能未評価」を意味する。
 
-必ずN、全対象8本のうちのreview coverage、除外件数と理由、Human class distribution、provider/model、Predictionの固定条件、rubric版、normalization版を併記する。8本だけの値は予備的評価であり、クラスのsupport不足も報告する。現時点はReviewed=0なのでAccuracyやF1を計算・推定しない。
+必ずN、全対象8本のうちのreview coverage、除外件数と理由、Human class distribution、provider/model、Predictionの固定条件、rubric版、normalization版を併記する。8本だけの値は予備的評価であり、クラスのsupport不足も報告する。本書作成時はReviewed=0だったため、その時点でAccuracyやF1を計算・推定しなかった。
 
 ### 既存コードでできること／まだ強制されないこと
 

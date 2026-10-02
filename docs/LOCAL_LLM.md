@@ -1,31 +1,62 @@
-# Local Ollama setup proposal
+# Local LLM Setup
 
-## Current PC and candidate models
+## v0.1.1で使用した構成
 
-Inspected on 2026-10-01: Intel Core i7-1255U, about 16GB RAM, Intel Iris Xe integrated graphics. Ollama was not found in PATH, standard install locations or running processes. CPU inference is the conservative starting point; no dedicated GPU/VRAM is required for it.
+SecPaper Atlasのデフォルトproviderは`local`。v0.1.1の8論文の評価では、Ollama `0.35.0`と`qwen3:4b`（Q4_K_M）を使用した。これは評価時の記録であり、最新版の指定や他環境での性能保証ではない。結果と限界は[Evaluation Results](EVALUATION_RESULTS.md)を参照。
 
-| Model | Download | Planning estimate for model RAM at context 8192 | Recommendation |
-|---|---:|---:|---|
-| qwen3:4b (Q4_K_M) | 2.5GB | about 4–6GB, plus Windows/app memory | First candidate on this 16GB PC |
-| qwen3:8b (Q4_K_M) | 5.2GB | about 8–10GB, plus Windows/app memory | Later quality comparison; slower and less memory headroom |
+## Windows / PowerShell
 
-Downloads are listed by the official [4b](https://ollama.com/library/qwen3:4b) and [8b](https://ollama.com/library/qwen3:8b) pages. RAM figures are planning estimates, not vendor guarantees or measured performance. CPU speed, context and other running apps affect feasibility. Prefer 16GB system RAM for the first candidate; a dedicated GPU is optional. Classification accuracy and latency on the eight real PDFs remain unmeasured until installation is approved.
+1. [公式Windows版Ollama](https://ollama.com/download/windows)をインストールする。導入条件は[Windows documentation](https://docs.ollama.com/windows)を参照。アプリ自身はOllamaの導入やモデル取得を行わない。
+2. タスクトレイからOllamaを終了する。Windowsのユーザー環境変数に`OLLAMA_NO_CLOUD=1`、`OLLAMA_HOST=127.0.0.1:11434`を設定し、スタートメニューからOllamaを起動する。[公式FAQ](https://docs.ollama.com/faq#setting-environment-variables-on-windows)に設定手順がある。cloud無効化後はOllamaログの`Ollama cloud disabled: true`で確認できる。
+3. 新しいPowerShellでモデルを明示的に取得し、インストール済み一覧を確認する。
 
-[Qwen3](https://qwenlm.github.io/blog/qwen3/) supports Japanese and English, instruction following and non-thinking inference. Both candidates use Apache 2.0, also shown by the official [model card](https://huggingface.co/Qwen/Qwen3-4B). The license permits commercial use subject to its terms, including license/notice obligations when redistributing. Ollama uses the [MIT license](https://github.com/ollama/ollama/blob/main/LICENSE). These are candidates for portfolio use; schema compliance does not establish classification quality.
+   ```powershell
+   ollama pull qwen3:4b
+   ollama list
+   ```
 
-## Installation approval boundary
+4. プロジェクトのルートで、`.env.example`から未作成の`.env`を用意する。既存の私的設定を上書きしない。
 
-No installation or model download has been performed. Official Ollama release metadata currently lists [v0.35.0](https://github.com/ollama/ollama/releases/tag/v0.35.0), with OllamaSetup.exe at 1,571,105,888 bytes (about 1.57GB). Versions and installer sizes change. The [Windows documentation](https://docs.ollama.com/windows) requires at least 4GB for the binary installation, separately from model storage. Reserve roughly 10GB of free disk space for installation, installer and the first model.
+   ```powershell
+   if (-not (Test-Path -LiteralPath .env)) { Copy-Item .env.example .env }
+   ```
 
-After approval:
+5. `.env`の分類設定を確認する。
 
-1. Install the official Windows Ollama release as a normal user.
-2. Configure the Ollama server process with `OLLAMA_NO_CLOUD=1` and restart it. This is a server setting, not merely an app .env setting. Confirm cloud is disabled and the server listens on loopback.
-3. Explicitly download only the chosen model, for example `ollama pull qwen3:4b`. The app never downloads models.
-4. Add CLASSIFIER_PROVIDER=local and LOCAL_LLM_MODEL=qwen3:4b to the existing ignored .env, preserving secrets. Keep LOCAL_LLM_BASE_URL=http://127.0.0.1:11434.
-5. Confirm the locally installed model using Ollama metadata before sending paper input.
-6. Hash all eight immutable PDFs, scan failed/pending rows once, then verify JSON/Pydantic validation, unique DB records, provider/model/time, Streamlit filters/details, untouched human fields and final PDF hashes.
+   ```dotenv
+   CLASSIFIER_PROVIDER=local
+   LOCAL_LLM_MODEL=qwen3:4b
+   LOCAL_LLM_BASE_URL=http://127.0.0.1:11434
+   LOCAL_LLM_TIMEOUT=180
+   LOCAL_LLM_VALIDATION_RETRIES=1
+   ```
 
-The app uses [Ollama JSON Schema structured outputs](https://docs.ollama.com/capabilities/structured-outputs). Invalid output permits at most one regeneration; connection and model errors fail without retry. If CPU classification times out, adjust LOCAL_LLM_TIMEOUT within 1–600 seconds after inspecting the failure rather than repeatedly resubmitting the inbox. Local mode never falls back to OpenAI.
+6. Python環境と依存関係を[READMEのSetup](../README.md#setup)に従って用意し、ルートから起動する。
 
-Model downloads and software updates access the network separately. Local Providerでは論文情報がPC外へ送信されない: paper input goes only to the trusted local Ollama installation; remote/cloud model references, external endpoints, proxies and redirects are rejected. OpenAI receives input only when the user explicitly selects the OpenAI Provider.
+   ```powershell
+   .\.venv\Scripts\python.exe -m streamlit run app.py
+   ```
+
+モデル名にコード上のデフォルトはない。使用するインストール済みモデルを明示する。処理時間や必要なメモリはモデル・CPU/GPU・入力長・他のアプリに依存する。
+
+## Classification contract
+
+Ollama `/api/chat`へ共通JSON Schemaを渡し、JSONをPydanticで厳密に検証する。`qwen3:4b`の呼出しは`think=false`、`temperature=0`、`num_ctx=8192`、`num_predict=1024`を使用する。構造の検証は意味的な分類精度を保証しない。
+
+不正なJSON/schemaでは最大1回だけ再生成する。接続・timeout・未取得モデル・HTTPエラーはその処理内で再試行しない。ローカルmodeからOpenAIへ自動的に切り替えない。
+
+## Privacy boundary
+
+論文入力は信頼するローカルOllamaへだけ送信する。アプリはHTTP loopback以外のendpoint、URL内のcredentials、redirect、cloud model参照を拒否し、proxy設定を使用せず、入力送信前にインストール済みモデルのメタデータを確認する。
+
+`OLLAMA_NO_CLOUD=1`はOllamaサーバー側の設定。[cloud無効化の公式手順](https://docs.ollama.com/faq#how-do-i-disable-ollama-cloud-features)に従って変更後に再起動する。アプリの`.env`へ書くだけでは起動済みサーバーを変更できない。ソフトウェア導入・モデル取得・更新は別途ネットワークを使用する。
+
+## Troubleshooting
+
+- **pending:** `CLASSIFIER_PROVIDER`と`LOCAL_LLM_MODEL`の設定を確認する。
+- **Connection error:** Ollamaが起動し、設定したloopback endpointで待ち受けているか確認する。
+- **Model not installed:** `ollama list`と`.env`のモデル名を照合する。取得は上記のコマンドで利用者が行う。
+- **Timeout:** 実行環境を確認し、必要なら`LOCAL_LLM_TIMEOUT`を1〜600秒の範囲で調整する。
+- **needs_review:** タイトル・Abstractまたは代用excerptの抽出品質に問題があるため、LLM送信前に保留された状態。
+
+再スキャンはpending / failed / needs_reviewを再試行する。分類済みhashはスキップし、元PDF・既存のHuman Review値・過去のAI分類履歴を保持する。
