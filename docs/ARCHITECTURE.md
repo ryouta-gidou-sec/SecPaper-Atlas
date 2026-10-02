@@ -59,6 +59,26 @@ sequenceDiagram
 
 The parser may inspect up to 12 pages locally to find front matter, abstract, keywords, and an introduction excerpt. The first page's text blocks retain bounding boxes and dominant font sizes to help distinguish title, authors, headers, and section boundaries. The entire extracted text is never passed to the classifier. Abstracts are capped at 6,000 characters; introduction excerpts are used only when an abstract is absent and are capped at 2,500 characters. PDF creation and modification dates are not considered publication years.
 
+Title extraction retains the existing top-quarter first-page layout and PDF-property
+priority. If both fail, a proceedings-cover fallback requires the explicit
+"This paper is included in the Proceedings of" text plus a USENIX conference URL
+or Security Symposium label. Only then may it search the top half of the first
+page and join overlapping, adjacent title lines. Its provenance is `first page
+cover layout`. Cover title geometry is not used to infer authors from mixed
+name/affiliation rows; existing PDF author properties retain their priority.
+
+Abstract labels accept case variations and explicit delimiters. A standalone
+`Summary` label or a delimited `Summary:`/`Summary—` label is also eligible before
+body section headings; subsection names such as "Summary of the Recovery Phase"
+are excluded. Unlabeled prose is not promoted by this new label rule. Introduction
+fallback first retains the first-page routes, then searches the parser's bounded
+text if necessary. It accepts standalone, Arabic-numbered (including split-line
+numbers), and Roman-numbered headings, skips split table-of-contents entries
+followed by page numbers, and stops at the next numbered section or an explicit
+References/Bibliography/Acknowledgments heading. Later-page provenance is `bounded
+PDF text fallback`. The quality gate, classifier inputs, and storage schema remain
+unchanged; extraction alone does not change a persisted classification status.
+
 ## Database design
 
 SQLite foreign keys are enabled for every connection. One insert and its label associations share a transaction.
