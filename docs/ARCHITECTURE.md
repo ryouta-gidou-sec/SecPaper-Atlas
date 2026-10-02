@@ -9,9 +9,10 @@ Version 0.1 is a local, inspectable classification pipeline rather than a genera
 | Component | Responsibility | Trust boundary |
 |---|---|---|
 | `src/config.py` | Resolve application-owned paths and environment settings; configure rotating logs | Reads secrets from local environment only |
-| `src/pdf_parser.py` | Discover contained files, check signatures, hash content, extract bounded text | Parses untrusted PDFs locally, read-only |
-| `src/metadata_extractor.py` | Recover conservative bibliographic fields and record their sources | Treats extracted text as untrusted data |
-| `src/classifier.py` | Build minimal API input, request Structured Output, validate with Pydantic | Only component that sends paper-derived data externally |
+| `src/pdf_parser.py` | Discover contained files, check signatures, hash content, extract bounded text and first-page block geometry | Parses untrusted PDFs locally, read-only |
+| `src/metadata_extractor.py` | Recover conservative bibliographic fields, provenance, and review reasons | Treats extracted text as untrusted data |
+| `src/classifier.py` | Common protocol, minimal input/prompt/schema, validation, factory and optional OpenAI provider | External paper disclosure only when OpenAI is selected |
+| `src/ollama_classifier.py` | Local model preflight and JSON Schema requests with bounded retry | Loopback only; no cloud inference or model download |
 | `src/database.py` | Own schema, transactions, bound SQL, search, and human-review updates | Persists private local research data |
 | `src/scanner.py` | Orchestrate stages and isolate failures per paper | Does not mutate input files |
 | `app.py` | Present dashboard, filters, detail, scan controls, and review form | User-facing local interface |
@@ -26,31 +27,36 @@ sequenceDiagram
     participant Scan as Scanner
     participant PDF as PDF parser
     participant Meta as Metadata extractor
-    participant AI as OpenAI boundary
+    participant AI as Selected classifier (local default / OpenAI opt-in)
     participant DB as SQLite
 
     User->>UI: Scan papers/inbox
     UI->>Scan: Start scan
     Scan->>PDF: Discover + SHA-256
     Scan->>DB: Check file_hash
-    alt new hash
+    alt new hash or unclassified record
         Scan->>PDF: Parse read-only
         PDF->>Meta: Text + PDF properties
-        Meta->>AI: Title + abstract + keywords
-        opt no abstract
-            Meta->>AI: Short introduction excerpt
+        Meta->>Scan: Fields + sources + quality issues
+        alt input passes quality gate
+            Scan->>AI: Title + abstract + keywords
+            opt no abstract
+                Scan->>AI: Short introduction excerpt
+            end
+            AI-->>Scan: Validated classification or safe error
+        else needs review
+            Scan-->>UI: Hold before API disclosure
         end
-        AI-->>Scan: Validated classification or safe error
         Scan->>DB: Transactional insert
-    else known hash
+    else already classified hash
         Scan-->>UI: Skipped
     end
-    DB-->>UI: Searchable current values + preserved AI values
+    DB-->>UI: Effective values (AI fallback or reviewed current) + preserved AI values
     User->>UI: Save manual review
     UI->>DB: Update current values only
 ```
 
-The parser may inspect up to 12 pages locally to find front matter, abstract, keywords, and an introduction excerpt. The entire extracted text is never passed to the classifier. Abstracts are capped at 6,000 characters; introduction excerpts are used only when an abstract is absent and are capped at 2,500 characters.
+The parser may inspect up to 12 pages locally to find front matter, abstract, keywords, and an introduction excerpt. The first page's text blocks retain bounding boxes and dominant font sizes to help distinguish title, authors, headers, and section boundaries. The entire extracted text is never passed to the classifier. Abstracts are capped at 6,000 characters; introduction excerpts are used only when an abstract is absent and are capped at 2,500 characters. PDF creation and modification dates are not considered publication years.
 
 ## Database design
 
@@ -58,7 +64,7 @@ SQLite foreign keys are enabled for every connection. One insert and its label a
 
 ### `papers`
 
-The central table stores identity, bibliographic metadata, workflow state, processing diagnostics, and scalar classification fields. `file_hash` is a unique 64-character SHA-256 hex digest. Metadata lists that are not filter dimensions in v0.1 (`authors` and `keywords`) are stored as JSON arrays. `metadata_sources` is a JSON object because it is sparse provenance metadata rather than a search dimension.
+The central table stores identity, bibliographic metadata, workflow state, processing diagnostics, and scalar classification fields. `file_hash` is a unique 64-character SHA-256 hex digest. Metadata lists that are not filter dimensions in v0.1 (`authors`, `keywords`, and extraction review reasons) are stored as JSON arrays. `metadata_sources` is a JSON object because it is sparse provenance metadata rather than a search dimension. `introduction_excerpt` is retained so a pending classification can be retried without relying on a stale in-memory parse.
 
 Scalar AI/current pairs preserve provenance:
 
@@ -67,7 +73,30 @@ Scalar AI/current pairs preserve provenance:
 - `ai_relevance_reason` and `relevance_reason`
 - `ai_relevance_confidence` and `relevance_confidence`
 
-`manually_reviewed` distinguishes untouched AI output from a review. `classification_error` allows extraction results to survive an API or validation failure.
+`manually_reviewed` distinguishes untouched AI output from a review. Before the first explicit review, current scalar fields and current label rows remain empty; classification writes only `ai_*` fields and `value_source='ai'` rows. Read and search results expose effective values without persisting a copy: AI values are the display/filter fallback while `manually_reviewed=0`, and current values take over after a review save. AI retries update only AI-owned values and never overwrite current values. Initialization adds missing workflow columns and clears the old AI-to-current projection only for unreviewed rows; reviewed rows and all AI originals are preserved. `classification_status` records `pending`, `classified`, `failed`, or `needs_review`; pending and failed records can be retried when scanning the inbox again. A needs-review record is re-extracted and is only sent when its input passes the quality gate. `classification_error` allows extraction results to survive an API or validation failure.
+
+### Processing duration
+
+`papers.processing_seconds` is the wall-clock duration in seconds of the latest
+non-skipped scanner attempt, measured with `time.perf_counter()`. Measurement starts
+before hashing and the duplicate lookup and ends after parsing, metadata extraction,
+the input quality gate, and any classifier preflight, generation and Pydantic
+validation (including bounded validation retries). It excludes the subsequent
+database writes, result logging and UI rendering. It is not classification-only
+latency; no separate extraction/classification duration columns are introduced.
+
+New inserts and existing-record retries use the same boundary. Successful, failed,
+pending and review-held attempts save their current measured duration; skipped
+classified hashes leave the previous duration and history unchanged. Duration and
+the classification result/history append share the classification-write transaction.
+The storage API accepts only finite non-negative durations. An omitted/None duration
+on a direct `update_classification()` call preserves the existing value, while zero
+is a valid measured value. No schema change or migration is required.
+
+`classification_runs` continues to preserve original validated answers and failures;
+it does not store per-run latency. `processing_seconds` describes the latest scan
+attempt, which may have failed while the latest successful AI projection is retained.
+Historical timings are not inferred or backfilled.
 
 ### Searchable many-to-many values
 
@@ -77,13 +106,15 @@ papers 1---* paper_methods *---1 research_methods
 papers 1---* paper_vulnerabilities *---1 vulnerabilities
 ```
 
-Each junction row includes `value_source`, either `ai` or `current`. Initial classification creates both sets. Review replaces only current rows. This avoids opaque JSON filtering and supports future AI-versus-human evaluation without destroying history.
+Each junction row includes `value_source`, either `ai` or `current`. Initial classification creates only AI rows. Review creates or replaces current rows. Search, facets, and the dashboard select AI rows for unreviewed papers and current rows for reviewed papers. This avoids opaque JSON filtering and supports future AI-versus-human evaluation without destroying history.
 
 ### Query behavior
 
-All user values are bound parameters. Dynamic table and column identifiers are selected only from an internal constant mapping. Keyword search covers title, abstract, current tags, and current vulnerabilities. Facet filters use current reviewed values and “match any selected value” semantics.
+All user values are bound parameters. Dynamic table and column identifiers are selected only from an internal constant mapping. Keyword search covers title, abstract, effective tags, and effective vulnerabilities. Category, tag, method, vulnerability, and relevance filters plus dashboard counts use AI values until a human review exists, then use current reviewed values. The Human correction form starts empty for unreviewed papers; saving it is the only operation that creates current values and sets `manually_reviewed=1`. Filters use “match any selected value” semantics.
 
-## AI API boundary
+## Classification provider boundary
+
+`ClassifierProvider` exposes provider, model, `classify(...) -> ClassificationResult` and `close()`. Scanner orchestration does not import provider clients. The factory defaults to local; OpenAI must be selected explicitly. `PaperClassifier` remains an alias of `OpenAIClassifier` for existing callers and mocks. Input gate, minimal payload, prompt, schema and output validation are shared. The local model name is configurable with no default in code.
 
 The request includes only:
 
@@ -92,7 +123,23 @@ The request includes only:
 - at most 30 keywords;
 - a 2,500-character introduction excerpt only if no abstract exists.
 
-The OpenAI Python SDK's schema helper receives `ClassificationResult`, a Pydantic model with forbidden extra fields, enum-constrained primary category and relevance, bounded list sizes, a bounded explanation, and confidence between 0 and 1. The response is validated again before persistence. Provider exceptions are converted to an error containing only the exception type.
+Before a request, title must look usable and either an abstract of at least 80 characters or a bounded introduction excerpt of at least 120 characters must exist. Extraction review reasons and obvious diagram/noise text hold the item at `needs_review`; missing keywords alone do not. The OpenAI Python SDK's schema helper receives `ClassificationResult`, a Pydantic model with forbidden extra fields, enum-constrained primary category and relevance, bounded list sizes, a bounded explanation, and confidence between 0 and 1. The response is validated again before persistence. Provider exceptions are converted to an error containing only the exception type.
+
+Ollama `/api/chat` receives the same JSON Schema in `format`, with all fields required, `stream=false`, `think=false`, temperature 0, context 8192 tokens and output cap 1024 tokens. JSON is parsed and strictly validated with Pydantic; no fence removal, enum guessing, default filling or numeric-string coercion is performed. Only output validation failures permit 0 or 1 regeneration. Transport, HTTP and model errors are not retried. The default local timeout is 180 seconds (configurable up to 600); OpenAI transport retries are disabled with a 60-second timeout.
+
+### Local privacy
+
+**Local Providerでは論文情報がPC外へ送信されない。** Only HTTP loopback addresses are accepted; localhost is normalized to a literal address. URL credentials, paths, queries and fragments are rejected. The HTTP client ignores proxy settings and does not follow redirects. Cloud model references and `/api/show` responses with remote_host/remote_model are rejected before paper submission; installed local model metadata must be present. The app performs no downloads, external fallback or tool invocation.
+
+Run the trusted local Ollama server with `OLLAMA_NO_CLOUD=1` and restart it after changes. An app `.env` entry alone does not configure an already running server. Installation, model downloads and software updates can use the network separately; paper classification stays local.
+
+### Additive provenance migration
+
+Nullable papers columns `classification_provider` (local/openai), `classification_model`, and `classified_at` describe the latest successful ai_* projection. A failed retry changes workflow state without attributing an older success to the failing provider.
+
+New `classification_runs` rows retain provider/model, validated result JSON or sanitized failure, UTC classification time for successes, and creation time. Run insertion, latest AI update and labels share a transaction. Retries replace the latest AI projection but retain all previous originals in history; Human Review never edits that history or gets overwritten by retries. Existing AI rows are snapshotted once, with unknown historical provider/model/date left null. Old failures keep their diagnostics without invented provenance. Migration is idempotent.
+
+Normal scans skip classified hashes regardless of provider changes. Explicit `reclassify=True` enables deliberate comparison runs. Evaluation reads successful history and current human labels read-only, groups by provider/model, and uses the latest success per hash per group. The original CSV metrics remain available.
 
 ## PDF processing and source integrity
 
@@ -100,9 +147,9 @@ The OpenAI Python SDK's schema helper receives `ClassificationResult`, a Pydanti
 2. Reject paths that do not remain under the inbox after resolution.
 3. Require a case-insensitive `.pdf` suffix and `%PDF-` magic bytes.
 4. Stream the file through SHA-256.
-5. Skip hashes already in SQLite.
+5. Skip hashes already classified in SQLite; retry pending, failed, and review-held rows.
 6. Open with PyMuPDF in read-only mode and reject password-protected or malformed files.
-7. Extract text in memory. Never save changes to the document.
+7. Extract text and first-page layout in memory. Never save changes to the document.
 
 PDF filename changes produce the same hash and remain duplicates. Two byte-identical PDFs in different folders also map to one record.
 

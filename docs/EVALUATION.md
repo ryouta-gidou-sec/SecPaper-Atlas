@@ -44,6 +44,18 @@ Rows missing either category are excluded. The script reports:
 
 No external ML library is required, which keeps the evaluation calculation auditable.
 
+## Local / OpenAI / Human comparison
+
+```powershell
+python scripts/evaluate.py --database data/papers.db
+```
+
+This reads SQLite in read-only mode and reuses the category Accuracy/Precision/Recall/F1 calculation. It joins successful classification_runs to explicitly reviewed current category labels, groups by provider/model and takes the latest success per PDF hash within each group. Retries do not inflate sample size; failed and unreviewed records are excluded. Historical runs with unknown provenance appear under unknown rather than being guessed to be OpenAI.
+
+Changing the provider/model does not automatically resubmit classified papers. Intentional comparison scans use `scan_inbox(..., reclassify=True)` and retain original history and Human Review values. Record the model, rubric and sample size with results. Groups may cover different papers; use a matched cohort when making a direct model comparison. Reviewing AI proposals can bias the reference labels; independently assigned ground truth remains preferable.
+
+This command currently evaluates primary category. Tags, methods, vulnerabilities and relevance remain stored for later metric extensions.
+
 ## Metric definitions
 
 For category `c`:

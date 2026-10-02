@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -30,6 +30,13 @@ class PaperStatus(str, Enum):
     SCREENED = "Screened"
     READ = "Read"
     IMPORTANT = "Important"
+
+
+class ClassificationStatus(str, Enum):
+    PENDING = "pending"
+    CLASSIFIED = "classified"
+    FAILED = "failed"
+    NEEDS_REVIEW = "needs_review"
 
 
 DEFAULT_TAGS = (
@@ -101,6 +108,7 @@ class ExtractedMetadata(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     introduction_excerpt: str | None = None
     metadata_sources: dict[str, str] = Field(default_factory=dict)
+    review_reasons: list[str] = Field(default_factory=list)
 
     @field_validator("title", "venue", "abstract", "introduction_excerpt")
     @classmethod
@@ -141,6 +149,14 @@ class ClassificationResult(BaseModel):
         if not cleaned:
             raise ValueError("relevance_reason must not be blank")
         return cleaned
+
+
+class ClassificationProvenance(BaseModel):
+    """Provider metadata, independent of provider response fields."""
+
+    model_config = ConfigDict(extra="forbid")
+    provider: Literal["local", "openai"] | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 def enum_values(enum_type: type[Enum]) -> list[str]:
