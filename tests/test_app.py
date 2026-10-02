@@ -43,9 +43,11 @@ def test_library_dashboard_filters_detail_and_human_correction(
     monkeypatch.setenv("DATABASE_PATH", str(database_path))
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run(timeout=15)
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"))
+    app.session_state["ui_language"] = "en"
+    app.run(timeout=15)
     assert not app.exception
-    assert any(item.value == "Research Paper Classifier" for item in app.title)
+    assert any(item.value == "SecPaper Atlas" for item in app.title)
     assert app.dataframe[0].value.iloc[0]["Primary Category"] == "Session Management"
     assert app.dataframe[0].value.iloc[0]["Classification source"] == "AI, not reviewed"
     assert app.dataframe[0].value.iloc[0]["AI Provider"] == "local"
@@ -186,9 +188,9 @@ def test_full_year_range_keeps_papers_with_unknown_year_visible(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     st.cache_resource.clear()
 
-    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run(
-        timeout=15
-    )
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"))
+    app.session_state["ui_language"] = "en"
+    app.run(timeout=15)
     assert not app.exception
     assert len(app.dataframe[0].value) == 3
     year_slider = next(item for item in app.slider if item.label == "Publication year")
