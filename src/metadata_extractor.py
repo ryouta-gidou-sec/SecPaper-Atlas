@@ -11,7 +11,8 @@ from src.pdf_parser import PDFTextBlock, ParsedPDF
 
 
 ABSTRACT_RE = re.compile(
-    r"(?im)^[ \t]*(?:abstract(?![A-Za-z0-9_])|概要|要旨|あらまし)"
+    r"(?im)^[ \t]*(?:abstract(?=[ \t]*(?:$|[:：.\-–—]))|"
+    r"summary(?=[ \t]*(?:$|[:：–—]))|概要|要旨|あらまし)"
     r"[ \t]*[:：\-–—]?[ \t]*"
 )
 KEYWORD_RE = re.compile(
@@ -19,20 +20,24 @@ KEYWORD_RE = re.compile(
     r"index[ \t]+terms?(?![A-Za-z0-9_])|キーワード)[ \t]*[:：\-–—]?[ \t]*"
 )
 INTRO_RE = re.compile(
-    r"(?im)^[ \t]*(?:(?:\d{1,2}(?:\.\d+)*[.)]?[ \t]*(?:\n[ \t]*)?)"
+    r"(?im)^[ \t]*(?:(?:(?:\d{1,2}(?:\.\d+)*[.)]?|[IVX]+[.)])"
+    r"[ \t]*(?:\n[ \t]*)?)"
     r")?(?:introduction(?![A-Za-z0-9_])|"
-    r"はじめに)[ \t]*[：:]?[ \t]*"
+    r"はじめに)[ \t]*[：:]?[ \t]*\r?$"
 )
 SECTION_RE = re.compile(
-    r"(?im)^[ \t]*\d{1,2}(?:\.\d+)*[.)]?(?:[ \t]+\n?[ \t]*|\n[ \t]*)"
-    r"[A-Za-z\u3040-\u30ff\u3400-\u9fff][^\n]{0,100}$"
+    r"(?im)^[ \t]*(?:(?:\d{1,2}(?:\.\d+)*[.)]?|[IVX]+[.)])"
+    r"(?:[ \t]+\n?[ \t]*|\n[ \t]*)"
+    r"[A-Za-z\u3040-\u30ff\u3400-\u9fff][^\n]{0,100}|"
+    r"(?:references|bibliography|acknowledg(?:e)?ments)[ \t]*)\r?$"
 )
 ABSTRACT_STOP_RE = re.compile(
     r"(?im)^[ \t]*(?:keywords?(?![A-Za-z0-9_])|key[ \t]+words?(?![A-Za-z0-9_])|"
     r"index[ \t]+terms?(?![A-Za-z0-9_])|キーワード|categories and subject descriptors|"
-    r"general terms|abstract(?![A-Za-z0-9_])|概要|要旨|あらまし|"
+    r"general terms|abstract(?![A-Za-z0-9_])|"
+    r"summary(?=[ \t]*(?:$|[:：–—]))|概要|要旨|あらまし|"
     r"introduction(?![A-Za-z0-9_])|はじめに|"
-    r"\d{1,2}(?:\.\d+)*[.)]?(?:[ \t]+\n?[ \t]*|\n[ \t]*)"
+    r"(?:\d{1,2}(?:\.\d+)*[.)]?|[IVX]+[.)])(?:[ \t]+\n?[ \t]*|\n[ \t]*)"
     r"(?:introduction(?![A-Za-z0-9_])|はじめに))"
 )
 AFFILIATION_RE = re.compile(
@@ -88,6 +93,10 @@ def extract_metadata(parsed: ParsedPDF, filename: str) -> ExtractedMetadata:
             introduction = _extract_introduction_from_blocks(blocks)
             if introduction:
                 intro_source = "first page layout fallback"
+        if not introduction and parsed.text and parsed.text != first_page:
+            introduction = _extract_introduction(parsed.text)
+            if introduction:
+                intro_source = "bounded PDF text fallback"
 
     metadata_sources: dict[str, str] = {}
     for field, source in (
@@ -153,16 +162,27 @@ def _extract_title(
     if metadata_title:
         return metadata_title, (), "PDF metadata"
 
+    front_text = " ".join(" ".join(item.text.split()) for item in blocks)
+    if re.search(r"(?i)this paper is included in the proceedings of", front_text) and re.search(
+        r"(?i)usenix\.org/conference/|USENIX Security Symposium", front_text
+    ):
+        cover_title, _ = _layout_title(blocks, page_height, is_cover=True)
+        if cover_title:
+            # Cover author rows mix names and affiliations. Do not feed the
+            # recovered cover title's position into the body-page author heuristic.
+            return cover_title, (), "first page cover layout"
+
     return None, (), "filename fallback"
 
 
 def _layout_title(
-    blocks: tuple[PDFTextBlock, ...], page_height: float | None
+    blocks: tuple[PDFTextBlock, ...], page_height: float | None, *, is_cover: bool = False
 ) -> tuple[str | None, tuple[PDFTextBlock, ...]]:
     if not blocks:
         return None, ()
     height = page_height or max((item.y1 for item in blocks), default=800.0)
-    cutoff = height * 0.25
+    # Only the explicitly identified proceedings-cover fallback widens the cutoff.
+    cutoff = height * (0.5 if is_cover else 0.25)
     candidates = [
         item
         for item in blocks
@@ -183,13 +203,18 @@ def _layout_title(
     for candidate in eligible:
         if candidate is best:
             continue
-        gap = candidate.y0 - best.y1
-        if -1.0 <= gap <= max(25.0, best.font_size * 2.2) and abs(
+        previous = selected[-1] if is_cover else best
+        gap = candidate.y0 - previous.y1
+        minimum_gap = -best.font_size * 0.5 if is_cover else -1.0
+        if minimum_gap <= gap <= max(25.0, best.font_size * 2.2) and abs(
             candidate.font_size - best.font_size
         ) <= 2.6:
             selected.append(candidate)
     selected.sort(key=lambda item: (item.y0, item.x0))
-    cleaned = [_clean_title(item.text) for item in selected]
+    cleaned = [
+        _normalize_text(item.text).strip(" ⋆∗†‡*") if is_cover else _clean_title(item.text)
+        for item in selected
+    ]
     joined = " ".join(value for value in cleaned if value)
     joined = re.sub(
         r"(?<=[\u3040-\u30ff\u3400-\u9fff])\s+(?=[\u3040-\u30ff\u3400-\u9fff])",
@@ -357,8 +382,16 @@ def _extract_labeled_abstract(
     sources = [(text, "first page text"), *((item.text, "first page layout") for item in blocks)]
     for source_text, source_name in sources:
         for match in ABSTRACT_RE.finditer(source_text):
+            # A later section named Summary is not a front-matter abstract.
+            is_summary = match.group().strip().casefold().startswith("summary")
+            if is_summary:
+                preceding = source_text[: match.start()]
+                if INTRO_RE.search(preceding) or SECTION_RE.search(preceding):
+                    continue
             body = source_text[match.end() :]
             body = _cut_at_first(body, ABSTRACT_STOP_RE)
+            if is_summary:
+                body = _cut_at_first(body, SECTION_RE)
             cleaned = _clean_body(body)
             minimum_length = 20 if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", cleaned) else 40
             if len(cleaned) >= minimum_length and not _looks_like_diagram_or_noise(cleaned):
@@ -436,13 +469,18 @@ def _next_keyword_stop() -> re.Pattern[str]:
 
 
 def _extract_introduction(text: str) -> str | None:
-    match = INTRO_RE.search(text)
-    if not match:
-        return None
-    body = text[match.end() :]
-    body = _cut_at_first(body, SECTION_RE)
-    cleaned = _clean_body(body)
-    return cleaned[:2500].strip() if len(cleaned) >= 80 else None
+    for match in INTRO_RE.finditer(text):
+        body = text[match.end() :].strip()
+        # PyMuPDF can emit a TOC entry as "1\nIntroduction\n5". Its page
+        # number is not prose; continue to the actual section in bounded text.
+        first_line = body.splitlines()[0].strip() if body else ""
+        if re.fullmatch(r"[\d .…·]+", first_line):
+            continue
+        body = _cut_at_first(body, SECTION_RE)
+        cleaned = _clean_body(body)
+        if len(cleaned) >= 80:
+            return cleaned[:2500].strip()
+    return None
 
 
 def _extract_introduction_from_blocks(blocks: tuple[PDFTextBlock, ...]) -> str | None:
@@ -450,15 +488,7 @@ def _extract_introduction_from_blocks(blocks: tuple[PDFTextBlock, ...]) -> str |
     start = next((index for index, item in enumerate(ordered) if _is_intro_heading(item.text)), None)
     if start is None:
         return None
-    parts: list[str] = []
-    for block in ordered[start:]:
-        if block is not ordered[start] and SECTION_RE.match(block.text.strip()):
-            break
-        value = INTRO_RE.sub("", block.text, count=1).strip() if block is ordered[start] else block.text
-        if value:
-            parts.append(value)
-    cleaned = _clean_body("\n".join(parts))
-    return cleaned[:2500].strip() if len(cleaned) >= 80 else None
+    return _extract_introduction("\n".join(item.text for item in ordered[start:]))
 
 
 def _extract_year(

@@ -196,3 +196,185 @@ def test_classification_quality_gate_holds_bad_title_and_empty_input() -> None:
     assert not classification_input_issues(
         title="A Genuine Paper Title", abstract="A useful abstract. " * 8, introduction_excerpt=None
     )
+
+
+ABSTRACT_BODY = (
+    "We evaluate authentication defenses across multiple web services and report "
+    "reproducible findings from controlled security experiments."
+)
+INTRO_BODY = (
+    "Web authentication protects access to private resources. This study examines "
+    "deployed protocols and measures their security properties under realistic attacks."
+)
+
+
+@pytest.mark.parametrize(
+    "heading", ["Abstract", "ABSTRACT", "abstract", "Abstract—", "Abstract:", "Summary", "SUMMARY:"]
+)
+def test_abstract_heading_variations_with_roman_section_boundary(heading: str) -> None:
+    text = f"{heading}\n{ABSTRACT_BODY}\nI. INTRODUCTION\nUNRELATED INTRODUCTION BODY"
+    result = extract_metadata(
+        ParsedPDF(text, text, {"title": "A Reliable Paper Title"}, 1), "paper.pdf"
+    )
+    assert result.abstract == ABSTRACT_BODY
+    assert result.introduction_excerpt is None
+    assert not result.review_reasons
+
+
+@pytest.mark.parametrize(
+    "heading",
+    ["1 Introduction", "1. Introduction", "I. INTRODUCTION", "INTRODUCTION", "1\nIntroduction"],
+)
+@pytest.mark.parametrize("next_heading", ["2 Methods", "II. METHODS", "References"])
+def test_introduction_heading_variations_and_boundaries(heading: str, next_heading: str) -> None:
+    text = f"{heading}\n{INTRO_BODY}\n{next_heading}\nUNRELATED SECTION BODY"
+    result = extract_metadata(
+        ParsedPDF(text, text, {"title": "A Reliable Paper Title"}, 1), "paper.pdf"
+    )
+    assert result.abstract is None
+    assert result.introduction_excerpt == INTRO_BODY
+    assert not result.review_reasons
+    assert not classification_input_issues(
+        title=result.title, abstract=None, introduction_excerpt=result.introduction_excerpt
+    )
+
+
+def test_bounded_introduction_fallback_skips_split_toc_entry() -> None:
+    first_page = "A Reliable Paper Title\nA short unlabeled synopsis."
+    toc = "Contents\n1\nIntroduction\n5\n2\nProtocol\n7"
+    text = f"{first_page}\n\n{toc}\n\n1. Introduction\n{INTRO_BODY}\n2 Protocol\nUNRELATED BODY"
+    result = extract_metadata(
+        ParsedPDF(text, first_page, {"title": "A Reliable Paper Title"}, 8), "paper.pdf"
+    )
+    assert result.abstract is None
+    assert result.introduction_excerpt == INTRO_BODY
+    assert result.metadata_sources["introduction_excerpt"] == "bounded PDF text fallback"
+
+
+def test_toc_alone_does_not_become_introduction_from_text_or_layout() -> None:
+    text = "Contents\n1\nIntroduction\n5\n2\nMethods\n7\n" + "A long table entry. " * 12
+    result = extract_metadata(
+        ParsedPDF(
+            text, text, {"title": "A Reliable Paper Title"}, 1,
+            first_page_blocks=(
+                block("1\nIntroduction\n5", 60), block("A long table entry. " * 12, 100)
+            ),
+        ),
+        "paper.pdf",
+    )
+    assert result.abstract is None
+    assert result.introduction_excerpt is None
+    assert result.review_reasons
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "AbstractProxy is a software component.",
+        "Abstract security concepts are discussed here.",
+        "Summary of the recovery experiment",
+        "Introduction of new functionality is discussed here.",
+    ],
+)
+def test_prose_and_summary_subsection_names_are_not_front_matter(line: str) -> None:
+    text = f"{line}\n{INTRO_BODY}"
+    result = extract_metadata(
+        ParsedPDF(text, text, {"title": "A Reliable Paper Title"}, 1), "paper.pdf"
+    )
+    assert result.abstract is None
+    assert result.introduction_excerpt is None
+
+
+@pytest.mark.parametrize("section", ["1 Introduction", "2 Methods"])
+def test_summary_after_body_sections_is_not_an_abstract(section: str) -> None:
+    text = f"{section}\n{INTRO_BODY}\nSummary:\n{ABSTRACT_BODY}"
+    result = extract_metadata(
+        ParsedPDF(text, text, {"title": "A Reliable Paper Title"}, 1), "paper.pdf"
+    )
+    assert result.abstract is None
+
+
+@pytest.mark.parametrize("next_heading", ["2 Methods", "II. METHODS", "References"])
+def test_summary_stops_at_body_section_even_without_introduction(next_heading: str) -> None:
+    text = f"Summary\n{ABSTRACT_BODY}\n{next_heading}\nUNRELATED SECTION BODY"
+    result = extract_metadata(
+        ParsedPDF(text, text, {"title": "A Reliable Paper Title"}, 1), "paper.pdf"
+    )
+    assert result.abstract == ABSTRACT_BODY
+
+
+def test_abstract_and_introduction_keep_their_character_limits() -> None:
+    abstract_text = "Abstract\n" + ABSTRACT_BODY * 60
+    result = extract_metadata(
+        ParsedPDF(abstract_text, abstract_text, {"title": "A Reliable Paper Title"}, 1), "paper.pdf"
+    )
+    assert len(result.abstract) == 6000
+    assert result.introduction_excerpt is None
+    intro_text = "1 Introduction\n" + INTRO_BODY * 30 + "\n2 Methods\nUNRELATED BODY"
+    result = extract_metadata(
+        ParsedPDF(intro_text, intro_text, {"title": "A Reliable Paper Title"}, 1), "paper.pdf"
+    )
+    assert result.introduction_excerpt == (INTRO_BODY * 30)[:2500].strip()
+    assert len(result.introduction_excerpt) <= 2500
+
+
+def cover_blocks(branding: str) -> tuple[PDFTextBlock, ...]:
+    # Actual covers use overlapping line boxes and multiple title blocks below
+    # the normal top-quarter cutoff, followed by mixed author/affiliation rows.
+    return (
+        block("This paper is included in the Proceedings of the", 430, 18),
+        block(branding, 455, 18),
+        block("Controlled Security Experiments:", 228, 21),
+        block("Evaluating Deployed", 244, 21),
+        block("Authentication Systems", 260, 21),
+        block("Alice Example, Example University; Bob Researcher, Example Institute", 290, 14),
+    )
+
+
+@pytest.mark.parametrize(
+    "branding", ["33rd USENIX Security Symposium.", "https://www.usenix.org/conference/soups2023"]
+)
+def test_proceedings_cover_title_fallback_joins_overlapping_lines(branding: str) -> None:
+    first_page = "\n".join(b.text for b in cover_blocks(branding))
+    body_page = f"Abstract\n{ABSTRACT_BODY}\n1 Introduction\n{INTRO_BODY}"
+    result = extract_metadata(
+        ParsedPDF(
+            first_page + "\n\n" + body_page, first_page, {}, 8,
+            first_page_blocks=cover_blocks(branding), first_page_size=(612, 792),
+        ),
+        "ACCOUNT_01_download_label.pdf",
+    )
+    assert result.title == (
+        "Controlled Security Experiments: Evaluating Deployed Authentication Systems"
+    )
+    assert result.metadata_sources["title"] == "first page cover layout"
+    assert result.abstract == ABSTRACT_BODY
+    assert result.authors == []  # Cover affiliations must not be guessed as author names.
+    assert not result.review_reasons
+
+
+def test_cover_fallback_preserves_existing_pdf_metadata_title_and_authors() -> None:
+    blocks = cover_blocks("33rd USENIX Security Symposium.")
+    text = f"Abstract\n{ABSTRACT_BODY}"
+    result = extract_metadata(
+        ParsedPDF(
+            text, text, {"title": "Existing Metadata Title", "author": "Alice Example"}, 1,
+            first_page_blocks=blocks, first_page_size=(612, 792),
+        ),
+        "paper.pdf",
+    )
+    assert result.title == "Existing Metadata Title"
+    assert result.authors == ["Alice Example"]
+    assert result.metadata_sources["title"] == "PDF metadata"
+
+
+@pytest.mark.parametrize(
+    "blocks", [cover_blocks("Unrelated Conference"), cover_blocks("USENIX Security Symposium")[2:]]
+)
+def test_cover_fallback_requires_both_signals(blocks: tuple[PDFTextBlock, ...]) -> None:
+    text = f"Abstract\n{ABSTRACT_BODY}"
+    result = extract_metadata(
+        ParsedPDF(text, text, {}, 1, first_page_blocks=blocks, first_page_size=(612, 792)),
+        "paper.pdf",
+    )
+    assert result.metadata_sources["title"] == "filename fallback"
