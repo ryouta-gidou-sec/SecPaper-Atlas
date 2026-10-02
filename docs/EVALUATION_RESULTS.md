@@ -1,0 +1,158 @@
+# v0.1.1 Evaluation Results
+
+記録日: 2026-10-03（Asia/Tokyo）。04｜v0.1.1のPrompt tuningは終了。Baseline、Prompt改善①、Final Promptを固定した8本で比較した最終結果を記録する。これ以上classifier Promptは変更しない。
+
+## 評価条件
+
+| 項目 | 条件 |
+|---|---|
+| Baseline evaluation type | 8-paper pilot evaluation |
+| Prompt改善後の比較 | development-set comparison / post-prompt-tuning comparison |
+| Model | `qwen3:4b` |
+| Provider | `local` / Ollama（loopback） |
+| Rubric | `v1`（[EVALUATION_RUBRIC.md](EVALUATION_RUBRIC.md)） |
+| Normalization | `normalization-v1` |
+| Baseline分類履歴 | `classification_runs.id = 2–9`（各PDF hashにつき1件） |
+| Prompt改善①の分類履歴 | `classification_runs.id = 10–17` |
+| Final Promptの分類履歴 | `classification_runs.id = 18–25` |
+| Human Ground Truth | Rubric v1で作成した既存の8件。全件`Reviewed`、review coverage 8/8 |
+| 除外件数 | 0件 |
+| 証拠範囲 | 保存済みtitle / abstract / keywords。Abstract欠落の1件のみ保存済みIntroduction excerpt |
+
+Ground Truthはローカルの`data/ground_truth.local.csv`を固定して利用する。CSVとDBのHuman値を同期・書換えしない。CSVのレビュー完了条件、版、列挙値、JSON配列、hashとbaseline runの対応、保存済みメタデータとの一致を検証した。
+
+Primary Categoryは完全一致件数 / 8、RelevanceはA/B/Cの一致件数 / 8。Tags / Methods / Target Vulnerabilitiesは、AI・Human双方にRubricに固定された`normalization-v1`だけを適用し、ラベル集合の完全一致件数 / 8を比較する。確認済み空集合`[]`も採点対象に含める。辞書にない語の大小文字、親子概念、原因と結果、Machine LearningとReinforcement Learningを統合しない。元の値は保持する。
+
+## Baseline: 8-paper pilot evaluation
+
+| 指標 | Baseline |
+|---|---:|
+| Primary Category | 8/8（Accuracy 100%） |
+| Relevance | 4/8（50%） |
+| Tags: exact match | 0/8（0%） |
+| Methods: exact match | 0/8（0%） |
+| Target Vulnerabilities: exact match | 2/8（25%） |
+| Confidence | 全8件`0.95` |
+
+Relevanceの不一致4件はすべて**AI A → Human B**。baseline run IDは3、4、5、9。自動検査、Web Security、scannerなどの共通点から、セッション研究への直接貢献を過大に判断する傾向があった。
+
+主な失敗傾向:
+
+- Session HijackingをSession Fixationの被害説明等から過剰付与する。
+- Browser Automation、Black-box Testingを、HTTP送信・Web対象・自動検査等から過剰付与する。
+- Experimental Study、Tool Development、Attack Simulationの明示された実施証拠を拾いきれない。
+- Relevance Aの条件を広く解釈する。
+- Confidenceが全8件同値で、判断の確実性の違いを表していない。
+
+## Promptの変更範囲
+
+Prompt改善①では`src/classifier.py`の共通SYSTEM_PROMPTだけを調整し、Prompt内の必要な規則を`tests/test_classifier.py`で検証した。
+
+- MethodsはAbstract、欠落時のみIntroduction excerpt中の明示証拠を要求する。Browser AutomationとBlack-box Testingの成立条件と、十分でない証拠を明記する。
+- Experimental Studyは実際のtest条件と報告結果、Tool Developmentは提案した実装成果、Attack Simulationは攻撃手順の再現と成否確認を要求する。
+- taxonomy / schema / Rubricを確認し、Automated DetectionとVulnerability ScannerをTagsとして扱い、Methodsに含めない。
+- Tagsの背景・一般概念・親概念・被害からの自動展開を抑える。Target Vulnerabilitiesは直接対象の具体的クラスだけとし、Fixationの結果からHijackingを追加しない。
+- Relevance Aはセッション研究への直接貢献、またはRubric v1の3条件を満たす具体的な汎用評価方法に限定する。転用可能な関連研究はBとする。
+- Confidenceはevidence strengthとclassification certaintyに応じて判断し、`0.95`等の固定値を使わないよう指示する。校正機能は追加しない。
+
+Final PromptではPrimary Categoryの判定規則だけを追加した。研究目的、提案手法が直接扱うセキュリティ対象、主要貢献、実験・評価結果の順に判断し、具体的な対象を検出・診断手法より優先する。脆弱性発見が評価結果であるだけならVulnerability Assessmentへ寄せない。AUTHSCAN専用の規則や、論文タイトル・filenameによる分岐は追加していない。Tags、Methods、Target Vulnerabilities、Relevance、Confidenceの判定規則はPrompt改善①から変更していない。
+
+taxonomy、normalization-v1、Ground Truth、Rubric v1、PDF、metadata extraction、database schema、Streamlit UI、Provider abstraction、Ollama integrationは変更しない。保存・入力経路は既存の共通分類器と`Database.update_classification`を利用する。
+
+## Post-prompt-tuning: development-set comparison
+
+Prompt改善①の実行日時: 2026-10-03 00:52:41–00:57:33（Asia/Tokyo）。**再分類8/8件成功、失敗0件**。schema validationを通った元の分類値を、新しいrun ID **10–17**として保存した。
+
+Final Promptの実行日時: 2026-10-03 01:06:37–01:12:08（Asia/Tokyo）。**再分類8/8件成功、失敗0件**。新しいrun ID **18–25**として保存した。既存run ID 1を含め、baseline 2–9とPrompt改善①の10–17を保持した。各段階は1論文につき1件で、評価分母は常に8。
+
+Ollama `0.35.0`、モデル`qwen3:4b`（Q4_K_M）。既存の推論条件を維持した: `temperature=0`、`think=false`、`num_ctx=8192`、`num_predict=1024`、timeout 180秒、validation retry上限1回。PDFの再抽出は行わず、baseline参照CSVと一致する保存済みメタデータを使った。`processing_seconds`は既存のscan全体の計測値なので更新していない。
+
+Prompt改善①のSHA-256: `fa7cd7748e6655c62c9b83eedea7c24540cd0e07a2d12404c7c193bce7de00b6`。
+
+Final PromptのSHA-256: `cc063dea4ef57d1677220bb6667c5cf3ce1fa1c5ade0010e4b515dfcd276feb8`。調整開始時HEAD: `db8a8ac62ff560062ab8e9b71851c638edff78f1`、branch: `fix/metadata-extraction`。
+
+| 指標 | Baseline（2–9） | Prompt改善①（10–17） | Final Prompt（18–25） |
+|---|---:|---:|---:|
+| Primary Category | 8/8（100%） | 7/8（87.5%） | 8/8（100%） |
+| Relevance | 4/8（50%） | 5/8（62.5%） | 4/8（50%） |
+| Tags: exact match | 0/8（0%） | 0/8（0%） | 0/8（0%） |
+| Methods: exact match | 0/8（0%） | 0/8（0%） | 0/8（0%） |
+| Target Vulnerabilities: exact match | 2/8（25%） | 7/8（87.5%） | 6/8（75%） |
+| Confidence分布 | 全件0.95（0.95 × 8） | 0.95 × 6、0.85 × 2 | 0.95 × 7、0.80 × 1 |
+| Confidence範囲 / 平均 | 0.95–0.95 / 0.95 | 0.85–0.95 / 0.925 | 0.80–0.95 / 0.93125 |
+
+AUTHSCANのPrimary Categoryは、BaselineのAuthentication → Prompt改善①のVulnerability Assessment → Final Promptの**Authentication**。FinalではHuman Ground Truthと一致した。
+
+セット完全一致だけでは部分的な変化を表せないため、補助的に全論文のラベル単位のTP / FP / FNも示す。micro F1は`2TP / (2TP + FP + FN)`。真陽性・過剰付与・見逃しを両側で同じ正規化を適用した後に数える。
+
+| Field | Baseline TP / FP / FN | Prompt改善① TP / FP / FN | Final TP / FP / FN | micro F1: Baseline → ① → Final |
+|---|---|---|---|---|
+| Tags | 19 / 21 / 11 | 21 / 25 / 9 | 20 / 23 / 10 | 0.543 → 0.553 → 0.548 |
+| Methods | 3 / 18 / 12 | 5 / 11 / 10 | 3 / 12 / 12 | 0.167 → 0.323 → 0.200 |
+| Target Vulnerabilities | 7 / 8 / 0 | 7 / 2 / 0 | 7 / 3 / 0 | 0.636 → 0.875 → 0.824 |
+
+### Run対応と単一ラベルの結果
+
+全baselineのConfidenceは0.95。以下のRelevanceは「Baseline → ① → Final / Human」を表す。
+
+| Baseline run | ① run | Final run | Human / Final Category | ① Category | Relevance | ① / Final Confidence |
+|---:|---:|---:|---|---|---|---|
+| 2 | 10 | 18 | Session Management | Session Management | A → A → A / A | 0.95 / 0.95 |
+| 3 | 11 | 19 | Authentication | Vulnerability Assessment | A → A → A / B | 0.85 / 0.95 |
+| 4 | 12 | 20 | Vulnerability Assessment | Vulnerability Assessment | A → A → A / B | 0.95 / 0.95 |
+| 5 | 13 | 21 | Vulnerability Assessment | Vulnerability Assessment | A → B → A / B | 0.85 / 0.80 |
+| 6 | 14 | 22 | Session Management | Session Management | A → A → A / A | 0.95 / 0.95 |
+| 7 | 15 | 23 | Session Management | Session Management | A → A → A / A | 0.95 / 0.95 |
+| 8 | 16 | 24 | Session Management | Session Management | A → A → A / A | 0.95 / 0.95 |
+| 9 | 17 | 25 | Vulnerability Assessment | Vulnerability Assessment | A → A → A / B | 0.95 / 0.95 |
+
+### Prompt改善①で観測した改善・悪化
+
+- **改善:** Target Vulnerabilitiesの過剰ラベルは8個から2個に減少し、見逃しは0個のまま。Session HijackingのTarget誤付与は3件から1件になった。具体的対象のないrun 13では空集合を返した。
+- **改善:** run 13のRelevanceがAから正解のBへ修正された。Browser AutomationのMethods誤付与は7件から2件に減少。Experimental Studyの見逃しは5件から4件、Attack Simulationは2件から1件に減少した。
+- **悪化:** run 11でPrimary Categoryが正解のAuthenticationからVulnerability Assessmentへ変わり、中心指標は7/8へ低下した。このregressionは後述のFinalで修正された。
+- **悪化:** Tagsの過剰付与が21個から25個に増加。見逃しは減ったが、完全一致は改善せず、micro precisionも0.475から0.457へ低下した。micro F1の微増だけを成功と扱わない。
+- **未解決:** MethodsのBlack-box Testing誤付与は6件のまま。Tool Developmentの見逃しは3件のまま。禁止を明記しても、Automated Detectionが2件、Vulnerability Scannerが1件のMethodsに残った。
+- **未解決:** Relevanceの残る不一致3件（run 11、12、17）はすべてAI A / Human B。CSRF・SQL Injection等の自動検査を、セッションへの直接貢献として扱う誤りが残る。run 11ではHumanのTarget空集合に対してSession FixationとSession Hijackingを推測している。
+- **未解決:** Confidenceは2種類になったが、6件は依然0.95。不一致にも高値を返しており、値が分かれたことは校正の改善を意味しない。
+
+### Final Promptの解釈と残る課題
+
+- **Primary Category:** Finalはbaselineの8/8を維持した。AUTHSCANはAuthenticationに戻り、①で発生した唯一のCategory regressionを修正した。
+- **Target Vulnerabilities:** baseline 2/8からFinal 6/8へ改善した。過剰ラベルは8個から3個に減り、見逃しは0個のまま。ただし①の7/8からは低下し、run 23でSession HijackingにSession Fixationが余分に追加された。
+- **過剰推定の抑制:** Browser AutomationのMethods誤付与はbaselineの7件からFinalの1件、Tagsでは3件から1件に減った。Session HijackingのTarget誤付与も3件から1件へ減少した。抑制はこのdevelopment setで観測された範囲に限る。
+- **Tags / Methods:** 完全一致は依然ともに0/8で課題が残る。Black-box TestingやAutomated DetectionのMethodsへの過剰付与、Tool Development等の見逃しが残る。①からFinalで補助的なmicro F1も低下した。
+- **Relevance:** 依然4/8で、Aへの過大評価が残る。Finalの不一致4件（run 19、20、21、25）はすべてAI A / Human B。①でBだったrun 13がFinalのrun 21ではAとなり、5/8から4/8へ戻った。
+- **段階間の変動:** Prompt改善①とFinal Promptの間で、RelevanceとTarget Vulnerabilitiesに変動があった。これらの判定規則自体はFinalで変更していないため、local LLMのrun-to-run variabilityが影響した可能性がある。ただしPrimary CategoryのPrompt追加により入力文脈も変わっており、同一Promptを反復する対照実験ではない。変動をvariabilityだけに帰属したり、その大きさを測定したとは扱わない。
+- **Confidence:** Finalは0.95 × 7、0.80 × 1。自己申告値であり、校正済み確率ではない。不一致にも高値を返しており、Confidenceの分布変化を校正改善とは解釈しない。
+
+この比較は**development-set comparison**であり、独立test-setによる一般化性能評価ではない。独立したholdoutは用意していない。将来の一般化性能評価には、Prompt調整に使っていない論文と十分な各Categoryのsupportが必要。完成を優先してPrompt tuningを終了し、再分類後の追加調整は行わない。
+
+## 検証と完成準備
+
+変更前: `104 passed in 27.94s`。Prompt改善①後: `126 passed in 13.14s`。Final Prompt後: `.venv/Scripts/python.exe -m pytest`で**`130 passed`**。①で証拠範囲、Methodsの成立／除外条件、対象脆弱性の非拡張、A/B条件、Confidence指示を検証する22ケース、FinalでPrimary Categoryの優先順位と対象・手法・評価結果の区別を検証する4ケースを追加した。これはPrompt内の規則の存在を検証するテストであり、LLMの遵守や分類精度を保証するものではない。
+
+各段階の実行前後の照合で、すべての元classification history、Ground Truth CSVのbytes、inboxの全ファイルのhash、Human current値、メタデータ、DB schema、既存のprocessing_secondsの保持を確認した。①とFinalでそれぞれ分類履歴8件を追記し、既存仕様に従って最新のAI projectionを更新した。DBのSQLite backupをローカルに保存した。今回の最終文書更新ではコード変更・再分類を行わない。
+
+個別のAI原値、Human値、正規化後の差分、入力payload hash、保全監査は、Gitから除外される`logs/v011-prompt-tuning/`と`logs/v011-primary-comparison/`に保存した。①の記録にはモデルdigestも含む。実行・集計用の一回限りの補助scriptも`logs/`内にあり、アプリ機能や既存の`evaluate.py`を拡張していない。研究データやDBを成果物のcommit対象に含めない。
+
+依頼された変更・テスト・再分類・比較・文書化は完了。Primary Category regressionの修正を確認し、04｜v0.1.1最終調整を終了する。multi-labelとRelevanceの課題を明記し、8本の結果から一般的なリリース品質やモデル性能を保証しない。mainへのmerge、v0.1.1 tag、remote追加、pushは行わない。
+
+## カテゴリ分布と解釈の限界
+
+| Human Category | support | Baseline Precision / Recall / F1 | ① Precision / Recall / F1 | Final Precision / Recall / F1 |
+|---|---:|---|---|---|
+| Authentication | 1 | 1.000 / 1.000 / 1.000 | 0.000 / 0.000 / 0.000 | 1.000 / 1.000 / 1.000 |
+| Session Management | 4 | 1.000 / 1.000 / 1.000 | 1.000 / 1.000 / 1.000 | 1.000 / 1.000 / 1.000 |
+| Vulnerability Assessment | 3 | 1.000 / 1.000 / 1.000 | 0.750 / 1.000 / 0.857 | 1.000 / 1.000 / 1.000 |
+| Authorization | 0 | 未評価 | 未評価 | 未評価 |
+| Token Security | 0 | 未評価 | 未評価 | 未評価 |
+| OAuth / OIDC / SSO | 0 | 未評価 | 未評価 | 未評価 |
+| Account Management | 0 | 未評価 | 未評価 | 未評価 |
+| Other Security | 0 | 未評価 | 未評価 | 未評価 |
+
+①のAuthentication予測件数は0件なのでPrecisionの分母も0。表の0.000は既存計算規約での値であり、観測されたPrecisionではない。
+
+8論文・出現3Categoryだけのpilotであり、support=0のCategoryは性能未評価。100%という値はこの8件のPrimary Category一致率だけを示し、`qwen3:4b`の一般性能を示さない。
+
+この8論文の失敗パターンをPrompt改善に利用しているため、改善後の比較は**development-set comparison**である。独立したtest-set evaluationとは呼ばず、一般化性能の向上を主張しない。Confidenceはモデルの自己申告値であり、実測Accuracyや校正済み確率ではない。
