@@ -1,4 +1,4 @@
-"""Streamlit user interface for Research Paper Classifier v0.1."""
+"""Streamlit user interface for SecPaper Atlas."""
 
 from __future__ import annotations
 
@@ -7,12 +7,13 @@ import streamlit as st
 from src.classifier import ClassificationError, create_classifier
 from src.config import configure_logging, get_settings
 from src.database import Database
+from src.i18n import LANGUAGES, display_enum, t
 from src.models import ClassificationStatus, PaperStatus, PrimaryCategory, Relevance, enum_values
 from src.scanner import scan_inbox
 
 
 st.set_page_config(
-    page_title="Research Paper Classifier",
+    page_title="SecPaper Atlas",
     page_icon="📚",
     layout="wide",
 )
@@ -44,25 +45,42 @@ def application_services() -> tuple[Database, object, object]:
 
 database, settings, logger = application_services()
 
-st.title("Research Paper Classifier")
-st.caption(
-    "A local-first workspace for triaging authentication and authorization security research."
-)
+with st.sidebar:
+    language = st.selectbox(
+        "Language / 言語 / 언어", list(LANGUAGES),
+        format_func=LANGUAGES.__getitem__, key="ui_language",
+    )
+
+# Keyed widgets retain their canonical values, but the browser can retain old
+# formatted labels. Re-publish those values once when the display language changes.
+language_changed = language != st.session_state.get("_ui_last_language", language)
+if language_changed:
+    enum_filter_keys = {"filter_categories", "filter_statuses", "filter_classification_statuses"}
+    for widget_key in list(st.session_state):
+        if widget_key in enum_filter_keys or (
+            widget_key.startswith("review-")
+            and widget_key.endswith(("-category", "-relevance", "-status"))
+        ):
+            st.session_state[widget_key] = st.session_state[widget_key]
+st.session_state["_ui_last_language"] = language
+
+st.title("SecPaper Atlas")
+st.caption(t("header_caption", language))
 
 with st.sidebar:
-    st.header("Classifier")
-    st.caption(f"Provider: {settings.classifier_provider}")
-    st.caption(f"Model: {settings.classifier_model or 'Not configured'}")
-    st.caption("Local processing on this PC" if settings.classifier_provider == "local"
-               else "Extracted classification input is sent to OpenAI")
-    st.header("Library")
-    if st.button("Scan papers/inbox", type="primary", width="stretch"):
+    st.header(t("Classifier", language))
+    st.caption(f"{t('Provider', language)}: {settings.classifier_provider}")
+    st.caption(f"{t('Model', language)}: {settings.classifier_model or t('Not configured', language)}")
+    st.caption(t("Local processing on this PC" if settings.classifier_provider == "local"
+                 else "Extracted classification input is sent to OpenAI", language))
+    st.header(t("Library", language))
+    if st.button(t("Scan papers/inbox", language), type="primary", width="stretch", key="scan_inbox"):
         classifier = None
         try:
             classifier = create_classifier(settings)
         except ClassificationError as exc:
             st.error(str(exc))
-        with st.spinner("Scanning new PDFs…"):
+        with st.spinner(t("Scanning new PDFs…", language)):
             try:
                 scan_results = scan_inbox(
                     inbox_dir=settings.inbox_dir,
@@ -74,33 +92,57 @@ with st.sidebar:
                 if classifier is not None:
                     classifier.close()
         if not scan_results:
-            st.info("No valid PDFs found in papers/inbox.")
+            st.info(t("No valid PDFs found in papers/inbox.", language))
         else:
             st.session_state["scan_results"] = [item.to_dict() for item in scan_results]
 
     if "scan_results" in st.session_state:
-        with st.expander("Last scan results", expanded=True):
+        with st.expander(t("Last scan results", language), expanded=True):
             for result in st.session_state["scan_results"]:
                 icon = {"Classified": "✅", "Skipped": "↪️", "Failed": "❌"}.get(
                     str(result["status"]), "⚠️"
                 )
-                st.write(f"{icon} **{result['filename']}** — {result['status']}")
-                st.caption(str(result["message"]))
+                st.write(f"{icon} **{result['filename']}** — {t(str(result['status']), language)}")
+                st.caption(t(str(result["message"]), language))
 
     st.divider()
-    st.header("Search & filters")
-    keyword = st.text_input("Keyword", placeholder="Title, abstract, tag, vulnerability")
-    facets = database.list_facets()
-    categories = st.multiselect("Primary category", enum_values(PrimaryCategory))
-    selected_tags = st.multiselect("Tags", facets["tags"])
-    selected_methods = st.multiselect("Research methods", facets["research_methods"])
-    selected_vulnerabilities = st.multiselect(
-        "Target vulnerabilities", facets["target_vulnerabilities"]
+    st.header(t("Search & filters", language))
+    keyword = st.text_input(
+        t("Keyword", language), placeholder=t("Title, abstract, tag, vulnerability", language),
+        key="filter_keyword",
     )
-    relevances = st.multiselect("Relevance", enum_values(Relevance))
-    statuses = st.multiselect("Status", enum_values(PaperStatus))
+    facets = database.list_facets()
+    categories = st.multiselect(
+        t("Primary category", language), enum_values(PrimaryCategory),
+        format_func=lambda value: display_enum(value, language), key="filter_categories",
+        placeholder=t("Choose options", language),
+    )
+    selected_tags = st.multiselect(
+        t("Tags", language), facets["tags"], key="filter_tags",
+        placeholder=t("Choose options", language),
+    )
+    selected_methods = st.multiselect(
+        t("Research methods", language), facets["research_methods"], key="filter_methods",
+        placeholder=t("Choose options", language),
+    )
+    selected_vulnerabilities = st.multiselect(
+        t("Target vulnerabilities", language), facets["target_vulnerabilities"],
+        key="filter_vulnerabilities",
+        placeholder=t("Choose options", language),
+    )
+    relevances = st.multiselect(
+        t("Relevance", language), enum_values(Relevance), key="filter_relevances",
+        placeholder=t("Choose options", language),
+    )
+    statuses = st.multiselect(
+        t("Status", language), enum_values(PaperStatus),
+        format_func=lambda value: display_enum(value, language), key="filter_statuses",
+        placeholder=t("Choose options", language),
+    )
     classification_statuses = st.multiselect(
-        "Classification status", enum_values(ClassificationStatus)
+        t("Classification status", language), enum_values(ClassificationStatus),
+        format_func=lambda value: display_enum(value, language), key="filter_classification_statuses",
+        placeholder=t("Choose options", language),
     )
 
     all_papers_for_years = database.search_papers()
@@ -110,30 +152,32 @@ with st.sidebar:
     if known_years:
         lower, upper = min(known_years), max(known_years)
         if lower < upper:
-            selected_range = st.slider("Publication year", lower, upper, (lower, upper))
+            selected_range = st.slider(
+                t("Publication year", language), lower, upper, (lower, upper), key="filter_years",
+            )
             if selected_range != (lower, upper):
                 year_min, year_max = selected_range
         else:
-            st.caption(f"Publication year: {lower}")
+            st.caption(f"{t('Publication year', language)}: {lower}")
 
 
 dashboard = database.dashboard_counts()
 metric_columns = st.columns(5)
-metric_columns[0].metric("Papers", dashboard["total"])
-metric_columns[1].metric("Relevance A", dashboard["relevances"].get("A", 0))
-metric_columns[2].metric("Relevance B", dashboard["relevances"].get("B", 0))
-metric_columns[3].metric("Relevance C", dashboard["relevances"].get("C", 0))
-metric_columns[4].metric("Unread", dashboard["unread"])
+metric_columns[0].metric(t("Papers", language), dashboard["total"])
+metric_columns[1].metric(t("Relevance A", language), dashboard["relevances"].get("A", 0))
+metric_columns[2].metric(t("Relevance B", language), dashboard["relevances"].get("B", 0))
+metric_columns[3].metric(t("Relevance C", language), dashboard["relevances"].get("C", 0))
+metric_columns[4].metric(t("Unread", language), dashboard["unread"])
 
-with st.expander("Category overview", expanded=dashboard["total"] > 0):
+with st.expander(t("Category overview", language), expanded=dashboard["total"] > 0):
     category_rows = [
-        {"Category": label, "Papers": count}
+        {t("Category", language): display_enum(label, language), t("Papers", language): count}
         for label, count in dashboard["categories"].items()
     ]
     if category_rows:
-        st.bar_chart(category_rows, x="Category", y="Papers", horizontal=True)
+        st.bar_chart(category_rows, x=t("Category", language), y=t("Papers", language), horizontal=True)
     else:
-        st.info("Add PDFs to papers/inbox and run a scan to build the dashboard.")
+        st.info(t("Add PDFs to papers/inbox and run a scan to build the dashboard.", language))
 
 papers = database.search_papers(
     keyword=keyword,
@@ -148,161 +192,187 @@ papers = database.search_papers(
     year_max=year_max,
 )
 
-st.subheader("Papers")
-st.caption(f"{len(papers)} result(s)")
+st.subheader(t("Papers", language))
+st.caption(t("{count} result(s)", language, count=len(papers)))
 if papers:
     table_rows = [
         {
-            "ID": paper["id"],
-            "Title": paper["title"] or paper["filename"],
-            "Year": paper["year"],
-            "Primary Category": paper["effective_primary_category"] or "Unclassified",
-            "Classification source": "Human reviewed"
+            t("ID", language): paper["id"],
+            t("Title", language): paper["title"] or paper["filename"],
+            t("Year", language): paper["year"],
+            t("Primary Category", language): display_enum(paper["effective_primary_category"], language)
+            if paper["effective_primary_category"] else t("Unclassified", language),
+            t("Classification source", language): t("Human reviewed", language)
             if paper["manually_reviewed"]
             else (
-                "AI, not reviewed"
+                t("AI, not reviewed", language)
                 if paper["ai_primary_category"]
-                else "No AI result"
+                else t("No AI result", language)
             ),
-            "Classification": paper["classification_status"],
-            "AI Provider": paper["classification_provider"] or "—",
-            "AI Model": paper["classification_model"] or "—",
-            "Tags": ", ".join(paper["effective_tags"]),
-            "Research Methods": ", ".join(paper["effective_research_methods"]),
-            "Relevance": paper["effective_relevance"] or "—",
-            "Status": paper["status"],
+            t("Classification", language): display_enum(paper["classification_status"], language),
+            t("AI Provider", language): paper["classification_provider"] or "—",
+            t("AI Model", language): paper["classification_model"] or "—",
+            t("Tags", language): ", ".join(paper["effective_tags"]),
+            t("Research Methods", language): ", ".join(paper["effective_research_methods"]),
+            t("Relevance", language): paper["effective_relevance"] or "—",
+            t("Status", language): display_enum(paper["status"], language),
         }
         for paper in papers
     ]
     st.dataframe(table_rows, hide_index=True, width="stretch")
 
-    options = {f"#{paper['id']} · {paper['title'] or paper['filename']}": paper["id"] for paper in papers}
-    selected_label = st.selectbox("Open paper details", list(options))
-    selected_paper = database.get_paper(options[selected_label])
+    options = {paper["id"]: f"#{paper['id']} · {paper['title'] or paper['filename']}" for paper in papers}
+    selected_id = st.selectbox(
+        t("Open paper details", language), list(options),
+        format_func=options.__getitem__, key="selected_paper_id",
+    )
+    selected_paper = database.get_paper(selected_id)
 else:
     selected_paper = None
-    st.info("No papers match the current filters.")
+    st.info(t("No papers match the current filters.", language))
 
 if selected_paper:
     st.divider()
     st.subheader(selected_paper["title"] or selected_paper["filename"])
     detail_left, detail_right = st.columns([2, 1])
     with detail_left:
-        st.markdown(f"**Authors:** {', '.join(selected_paper['authors']) or 'Unknown'}")
-        st.markdown(f"**Year:** {selected_paper['year'] or 'Unknown'}")
-        st.markdown(f"**Venue:** {selected_paper['venue'] or 'Unknown'}")
-        st.markdown("**Abstract**")
-        st.write(selected_paper["abstract"] or "No abstract could be extracted.")
-        st.markdown(f"**Keywords:** {', '.join(selected_paper['keywords']) or 'None extracted'}")
-        st.markdown(f"**Classification status:** {selected_paper['classification_status']}")
+        st.markdown(f"**{t('Authors', language)}:** {', '.join(selected_paper['authors']) or t('Unknown', language)}")
+        st.markdown(f"**{t('Year', language)}:** {selected_paper['year'] or t('Unknown', language)}")
+        st.markdown(f"**{t('Venue', language)}:** {selected_paper['venue'] or t('Unknown', language)}")
+        st.markdown(f"**{t('Abstract', language)}**")
+        st.write(selected_paper["abstract"] or t("No abstract could be extracted.", language))
+        st.markdown(f"**{t('Keywords', language)}:** {', '.join(selected_paper['keywords']) or t('None extracted', language)}")
+        st.markdown(f"**{t('Classification status', language)}:** {display_enum(selected_paper['classification_status'], language)}")
         st.caption(
-            f"AI Provider: {selected_paper['classification_provider'] or 'Unknown'} · "
-            f"Model: {selected_paper['classification_model'] or 'Unknown'} · "
-            f"Classified at: {selected_paper['classified_at'] or 'Unknown'}"
+            f"{t('AI Provider', language)}: {selected_paper['classification_provider'] or t('Unknown', language)} · "
+            f"{t('Model', language)}: {selected_paper['classification_model'] or t('Unknown', language)} · "
+            f"{t('Classified at', language)}: {selected_paper['classified_at'] or t('Unknown', language)}"
         )
-        with st.expander("AI classification history"):
+        with st.expander(t("AI classification history", language)):
             for run in database.classification_history(selected_paper["id"]):
-                st.caption(f"#{run['id']} · {run['provider'] or 'Unknown'} · "
-                           f"{run['model'] or 'Unknown'} · {run['status']}")
+                st.caption(f"#{run['id']} · {run['provider'] or t('Unknown', language)} · "
+                           f"{run['model'] or t('Unknown', language)} · {display_enum(run['status'], language)}")
                 if run["result"]:
                     st.json(run["result"])
                 elif run["error"]:
                     st.write(run["error"])
         if selected_paper["metadata_review_reasons"]:
             for reason in selected_paper["metadata_review_reasons"]:
-                st.warning(reason)
+                st.warning(t(reason, language))
         if not selected_paper["abstract"] and selected_paper["introduction_excerpt"]:
-            st.markdown("**Introduction excerpt (abstract fallback)**")
+            st.markdown(f"**{t('Introduction excerpt (abstract fallback)', language)}**")
             st.write(selected_paper["introduction_excerpt"])
-        with st.expander("Extraction sources"):
+        with st.expander(t("Extraction sources", language)):
             st.json(selected_paper["metadata_sources"])
         if selected_paper["manually_reviewed"]:
-            classification_heading = "#### Classification — Human reviewed"
+            classification_heading = "Classification — Human reviewed"
         elif selected_paper["ai_primary_category"]:
-            classification_heading = "#### Classification — AI proposal, not reviewed"
+            classification_heading = "Classification — AI proposal, not reviewed"
         else:
-            classification_heading = "#### Classification — unavailable"
-        st.markdown(classification_heading)
+            classification_heading = "Classification — unavailable"
+        st.markdown(f"#### {t(classification_heading, language)}")
         st.markdown(
-            f"**Primary category:** {selected_paper['effective_primary_category'] or 'Unavailable'}"
+            f"**{t('Primary category', language)}:** "
+            + (display_enum(selected_paper['effective_primary_category'], language)
+               if selected_paper['effective_primary_category'] else t('Unavailable', language))
         )
-        st.markdown(f"**Tags:** {', '.join(selected_paper['effective_tags']) or 'None'}")
+        st.markdown(f"**{t('Tags', language)}:** {', '.join(selected_paper['effective_tags']) or t('None', language)}")
         st.markdown(
-            f"**Research methods:** {', '.join(selected_paper['effective_research_methods']) or 'None'}"
-        )
-        st.markdown(
-            "**Target vulnerabilities:** "
-            + (", ".join(selected_paper["effective_target_vulnerabilities"]) or "None")
-        )
-        st.markdown(f"**Relevance:** {selected_paper['effective_relevance'] or 'Unavailable'}")
-        st.markdown(
-            f"**Relevance reason:** {selected_paper['effective_relevance_reason'] or 'Unavailable'}"
+            f"**{t('Research methods', language)}:** {', '.join(selected_paper['effective_research_methods']) or t('None', language)}"
         )
         st.markdown(
-            f"**Confidence:** {selected_paper['effective_relevance_confidence'] if selected_paper['effective_relevance_confidence'] is not None else 'Unknown'}"
+            f"**{t('Target vulnerabilities', language)}:** "
+            + (", ".join(selected_paper["effective_target_vulnerabilities"]) or t("None", language))
+        )
+        st.markdown(f"**{t('Relevance', language)}:** {selected_paper['effective_relevance'] or t('Unavailable', language)}")
+        st.markdown(
+            f"**{t('Relevance reason', language)}:** {selected_paper['effective_relevance_reason'] or t('Unavailable', language)}"
+        )
+        st.markdown(
+            f"**{t('Confidence', language)}:** {selected_paper['effective_relevance_confidence'] if selected_paper['effective_relevance_confidence'] is not None else t('Unknown', language)}"
         )
         st.code(selected_paper["filepath"], language=None)
         if selected_paper["classification_error"]:
-            st.warning(f"AI classification unavailable: {selected_paper['classification_error']}")
+            st.warning(t("AI classification unavailable: {error}", language,
+                         error=t(selected_paper['classification_error'], language)))
 
     with detail_right:
-        st.markdown("#### Human correction")
+        st.markdown(f"#### {t('Human correction', language)}")
         category_options = [None, *enum_values(PrimaryCategory)]
         relevance_options = [None, *enum_values(Relevance)]
         status_options = enum_values(PaperStatus)
         with st.form(f"review-{selected_paper['id']}"):
             selected_category = st.selectbox(
-                "Primary category",
+                t("Primary category", language),
                 category_options,
-                index=category_options.index(selected_paper["primary_category"])
+                index=0
+                if language_changed and f"review-{selected_paper['id']}-category" in st.session_state
+                else category_options.index(selected_paper["primary_category"])
                 if selected_paper["manually_reviewed"]
                 and selected_paper["primary_category"] in category_options
                 else 0,
-                format_func=lambda value: value or "Select a category",
+                format_func=lambda value: display_enum(value, language)
+                if value else t("Select a category", language),
+                key=f"review-{selected_paper['id']}-category",
+                placeholder=t("Select a category", language),
             )
             tags_text = st.text_area(
-                "Tags (comma-separated; custom tags allowed)",
+                t("Tags (comma-separated; custom tags allowed)", language),
                 value=", ".join(selected_paper["tags"])
                 if selected_paper["manually_reviewed"]
                 else "",
+                key=f"review-{selected_paper['id']}-tags",
             )
             methods_text = st.text_area(
-                "Research methods (comma-separated)",
+                t("Research methods (comma-separated)", language),
                 value=", ".join(selected_paper["research_methods"])
                 if selected_paper["manually_reviewed"]
                 else "",
+                key=f"review-{selected_paper['id']}-methods",
             )
             vulnerabilities_text = st.text_area(
-                "Target vulnerabilities (comma-separated)",
+                t("Target vulnerabilities (comma-separated)", language),
                 value=", ".join(selected_paper["target_vulnerabilities"])
                 if selected_paper["manually_reviewed"]
                 else "",
+                key=f"review-{selected_paper['id']}-vulnerabilities",
             )
             selected_relevance = st.selectbox(
-                "Relevance",
+                t("Relevance", language),
                 relevance_options,
-                index=relevance_options.index(selected_paper["relevance"])
+                index=0
+                if language_changed and f"review-{selected_paper['id']}-relevance" in st.session_state
+                else relevance_options.index(selected_paper["relevance"])
                 if selected_paper["manually_reviewed"]
                 and selected_paper["relevance"] in relevance_options
                 else 0,
-                format_func=lambda value: value or "Select relevance",
+                format_func=lambda value: value or t("Select relevance", language),
+                key=f"review-{selected_paper['id']}-relevance",
+                placeholder=t("Select relevance", language),
             )
             relevance_reason = st.text_area(
-                "Relevance reason",
+                t("Relevance reason", language),
                 value=(selected_paper["relevance_reason"] or "")
                 if selected_paper["manually_reviewed"]
                 else "",
                 max_chars=500,
+                key=f"review-{selected_paper['id']}-reason",
             )
             selected_status = st.selectbox(
-                "Status",
+                t("Status", language),
                 status_options,
-                index=status_options.index(selected_paper["status"]),
+                index=0
+                if language_changed and f"review-{selected_paper['id']}-status" in st.session_state
+                else status_options.index(selected_paper["status"]),
+                format_func=lambda value: display_enum(value, language),
+                key=f"review-{selected_paper['id']}-status",
             )
-            submitted = st.form_submit_button("Save review", type="primary")
+            submitted = st.form_submit_button(
+                t("Save review", language), type="primary", key=f"review-{selected_paper['id']}-save",
+            )
         if submitted:
             if selected_category is None or selected_relevance is None:
-                st.error("Select a primary category and relevance before saving the review.")
+                st.error(t("Select a primary category and relevance before saving the review.", language))
             else:
                 edited_tags = [item.strip() for item in tags_text.split(",") if item.strip()]
                 edited_methods = [item.strip() for item in methods_text.split(",") if item.strip()]
@@ -319,25 +389,25 @@ if selected_paper:
                     target_vulnerabilities=edited_vulnerabilities,
                     relevance_reason=relevance_reason,
                 )
-                st.success("Review saved. The original AI values were preserved.")
+                st.success(t("Review saved. The original AI values were preserved.", language))
                 st.rerun()
 
-        with st.expander("Latest AI result (earlier originals in history)"):
-            st.write(f"Category: {selected_paper['ai_primary_category'] or 'Unavailable'}")
-            st.write(f"Tags: {', '.join(selected_paper['ai_tags']) or 'Unavailable'}")
+        with st.expander(t("Latest AI result (earlier originals in history)", language)):
+            st.write(f"{t('Category', language)}: "
+                     + (display_enum(selected_paper['ai_primary_category'], language)
+                        if selected_paper['ai_primary_category'] else t('Unavailable', language)))
+            st.write(f"{t('Tags', language)}: {', '.join(selected_paper['ai_tags']) or t('Unavailable', language)}")
             st.write(
-                "Methods: "
-                + (", ".join(selected_paper["ai_research_methods"]) or "Unavailable")
+                f"{t('Methods', language)}: "
+                + (", ".join(selected_paper["ai_research_methods"]) or t("Unavailable", language))
             )
             st.write(
-                "Vulnerabilities: "
-                + (", ".join(selected_paper["ai_target_vulnerabilities"]) or "Unavailable")
+                f"{t('Vulnerabilities', language)}: "
+                + (", ".join(selected_paper["ai_target_vulnerabilities"]) or t("Unavailable", language))
             )
-            st.write(f"Relevance: {selected_paper['ai_relevance'] or 'Unavailable'}")
-            st.write(f"Reason: {selected_paper['ai_relevance_reason'] or 'Unavailable'}")
-            st.write(f"Manually reviewed: {'Yes' if selected_paper['manually_reviewed'] else 'No'}")
+            st.write(f"{t('Relevance', language)}: {selected_paper['ai_relevance'] or t('Unavailable', language)}")
+            st.write(f"{t('Reason', language)}: {selected_paper['ai_relevance_reason'] or t('Unavailable', language)}")
+            st.write(f"{t('Manually reviewed', language)}: {t('Yes' if selected_paper['manually_reviewed'] else 'No', language)}")
 
 st.divider()
-st.caption(
-    "Local-first: source PDFs are never moved, renamed, edited, uploaded in full, or committed by default."
-)
+st.caption(t("footer_caption", language))

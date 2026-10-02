@@ -15,6 +15,7 @@ Version 0.1.1 is a local, inspectable classification pipeline. It prioritizes so
 | `src/ollama_classifier.py` | Local model preflight and JSON Schema requests with bounded retry | Loopback only; no cloud inference or model download |
 | `src/database.py` | Own schema, transactions, bound SQL, search, and human-review updates | Persists private local research data |
 | `src/scanner.py` | Orchestrate stages and isolate failures per paper | Does not mutate input files |
+| `src/i18n.py` | Translate UI text and enum display labels into Japanese, English, or Korean | Presentation only; never translates paper text or stored values |
 | `app.py` | Present dashboard, filters, detail, scan controls, and review form | User-facing local interface |
 | `scripts/evaluate.py` | Compare human labels with AI primary-category output and report accuracy / per-category metrics | Reads an explicitly prepared local CSV or successful run history and Human Review categories from SQLite in read-only mode |
 
@@ -111,6 +112,27 @@ Each junction row includes `value_source`, either `ai` or `current`. Initial cla
 ### Query behavior
 
 All user values are bound parameters. Dynamic table and column identifiers are selected only from an internal constant mapping. Keyword search covers title, abstract, effective tags, and effective vulnerabilities. Category, tag, method, vulnerability, and relevance filters plus dashboard counts use AI values until a human review exists, then use current reviewed values. The Human correction form starts empty for unreviewed papers; saving it is the only operation that creates current values and sets `manually_reviewed=1`. Filters use “match any selected value” semantics.
+
+## UI language boundary
+
+The compact language selector is the first sidebar control. Japanese is the initial
+default; `ui_language` lives only in Streamlit session state and survives reruns.
+`src/i18n.py` resolves UI text with English, then the key itself, as fallbacks.
+PrimaryCategory, PaperStatus, and ClassificationStatus have display aliases;
+unmapped labels retain their original text. Selectbox and multiselect options stay
+canonical and use `format_func` for translated display. Stable widget keys preserve
+filters, selected paper IDs, and review state when the language changes. Search and
+review persistence receive canonical/original values, never translated enum labels.
+On a language change, the UI re-publishes the existing enum widget values through
+session state so the browser refreshes selected display labels as well as options.
+
+Table and chart labels are translated at rendering time. Extracted titles, authors,
+abstracts, keywords, free-form tags/methods/vulnerabilities, reasons, provider/model
+identifiers, and original history/provenance JSON remain unchanged. Known fixed
+scan/review messages are translated; unmatched diagnostics are shown verbatim.
+Language selection makes no classifier call or database write. Schema, taxonomy,
+prompts, AI/Human Review separation, Ground Truth, and evaluation are unchanged.
+The existing CSS, five metric columns, and 2:1 detail/review columns are retained.
 
 ## Classification provider boundary
 
