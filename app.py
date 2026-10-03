@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import altair as alt
 import streamlit as st
 
 from src.classifier import ClassificationError, create_classifier
@@ -69,11 +70,6 @@ st.title("SecPaper Atlas")
 st.caption(t("header_caption", language))
 
 with st.sidebar:
-    st.header(t("Classifier", language))
-    st.caption(f"{t('Provider', language)}: {settings.classifier_provider}")
-    st.caption(f"{t('Model', language)}: {settings.classifier_model or t('Not configured', language)}")
-    st.caption(t("Local processing on this PC" if settings.classifier_provider == "local"
-                 else "Extracted classification input is sent to OpenAI", language))
     st.header(t("Library", language))
     if st.button(t("Scan papers/inbox", language), type="primary", width="stretch", key="scan_inbox"):
         classifier = None
@@ -161,6 +157,12 @@ with st.sidebar:
         else:
             st.caption(f"{t('Publication year', language)}: {lower}")
 
+    st.header(t("Classifier", language))
+    st.caption(f"{t('Provider', language)}: {settings.classifier_provider}")
+    st.caption(f"{t('Model', language)}: {settings.classifier_model or t('Not configured', language)}")
+    st.caption(t("Local processing on this PC" if settings.classifier_provider == "local"
+                 else "Extracted classification input is sent to OpenAI", language))
+
 
 dashboard = database.dashboard_counts()
 metric_columns = st.columns(5)
@@ -176,7 +178,15 @@ with st.expander(t("Category overview", language), expanded=dashboard["total"] >
         for label, count in dashboard["categories"].items()
     ]
     if category_rows:
-        st.bar_chart(category_rows, x=t("Category", language), y=t("Papers", language), horizontal=True)
+        category_chart = alt.Chart(alt.Data(values=category_rows)).mark_bar().encode(
+            x=alt.X(
+                field=t("Papers", language), type="quantitative",
+                scale=alt.Scale(domainMin=0, zero=True),
+                axis=alt.Axis(format="d", tickMinStep=1),
+            ),
+            y=alt.Y(field=t("Category", language), type="nominal"),
+        )
+        st.altair_chart(category_chart, width="stretch")
     else:
         st.info(t("Add PDFs to papers/inbox and run a scan to build the dashboard.", language))
 
