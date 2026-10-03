@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import Mock
 
+import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from src.database import Database
 from src.models import ClassificationResult, ExtractedMetadata
+from src.config import get_settings
+from src.i18n import t
+from src.pdf_access import BROWSER_FAILED, PDF_UNAVAILABLE
+from src.pdf_parser import sha256_file
 
 
 def test_library_dashboard_filters_detail_and_human_correction(
@@ -199,3 +205,74 @@ def test_full_year_range_keeps_papers_with_unknown_year_visible(
     assert not app.exception
     assert len(app.dataframe[0].value) == 1
     assert app.dataframe[0].value.iloc[0]["Title"] == "A Test Paper About known-old.pdf"
+
+
+@pytest.mark.parametrize("language", ["ja", "en", "ko"])
+@pytest.mark.parametrize("outcome", ["success", "false", "exception", "missing"])
+def test_pdf_quick_access_uses_selected_paper_and_preserves_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str, outcome: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "quick-access.db"))
+    settings = get_settings(tmp_path)
+    settings.ensure_directories()
+    monkeypatch.setattr("src.config.get_settings", lambda: settings)
+    database = Database(settings.database_path)
+    database.initialize()
+    ids = []
+    paths = []
+    for index in range(2):
+        path = settings.inbox_dir / f"source-{index}.pdf"
+        path.write_bytes(f"%PDF-1.7\nsource {index}\n".encode())
+        paths.append(path)
+        ids.append(database.add_paper(
+            file_hash=sha256_file(path), filename=path.name, filepath=str(path.resolve()),
+            metadata=ExtractedMetadata(title=f"PDF access fixture {index}"), classification=None,
+        ))
+    opener = Mock(return_value=outcome != "false")
+    if outcome == "exception":
+        opener.side_effect = OSError(r"C:\Users\private\source.pdf")
+    monkeypatch.setattr("src.pdf_access.webbrowser.open_new_tab", opener)
+    st.cache_resource.clear()
+    try:
+        app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"))
+        app.session_state["ui_language"] = language
+        app.run(timeout=15)
+        app.selectbox(key="selected_paper_id").set_value(ids[1]).run(timeout=15)
+        assert not app.exception
+        opener.assert_not_called()
+        assert app.button(key="open_paper_pdf").label == "📄 " + t("Open PDF in default browser", language)
+        assert not app.code
+        columns = app.get("column")
+        assert [round(column.proto.weight, 3) for column in columns] == [0.2] * 5 + [0.667, 0.333]
+        assert len(columns[-2].get("button")) == 1
+        assert len(columns[-1].get("form")) == 1
+        before_db = database.path.read_bytes()
+        before_papers = database.search_papers()
+        before_history = [database.classification_history(paper_id) for paper_id in ids]
+        before_pdfs = [path.read_bytes() for path in paths]
+        if outcome == "missing":
+            paths[1].unlink()  # Isolated fixture only.
+        app.button(key="open_paper_pdf").click().run(timeout=15)
+        assert not app.exception
+        if outcome == "missing":
+            opener.assert_not_called()
+            expected_warning = PDF_UNAVAILABLE
+        else:
+            opener.assert_called_once_with(paths[1].resolve().as_uri())
+            expected_warning = BROWSER_FAILED
+        if outcome != "success":
+            assert any(item.value == t(expected_warning, language) for item in app.warning)
+        else:
+            assert not app.warning
+        assert not any("C:\\" in item.value or str(tmp_path) in item.value for item in app.warning)
+        # A later UI rerun must not dispatch the PDF again.
+        app.run(timeout=15)
+        assert opener.call_count == (0 if outcome == "missing" else 1)
+        assert database.path.read_bytes() == before_db
+        assert database.search_papers() == before_papers
+        assert [database.classification_history(paper_id) for paper_id in ids] == before_history
+        assert paths[0].read_bytes() == before_pdfs[0]
+        if outcome != "missing":
+            assert paths[1].read_bytes() == before_pdfs[1]
+    finally:
+        st.cache_resource.clear()

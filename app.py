@@ -9,6 +9,7 @@ from src.config import configure_logging, get_settings
 from src.database import Database
 from src.i18n import LANGUAGES, display_enum, t
 from src.models import ClassificationStatus, PaperStatus, PrimaryCategory, Relevance, enum_values
+from src.pdf_access import PDFAccessError, open_paper_pdf
 from src.scanner import scan_inbox
 
 
@@ -239,6 +240,13 @@ if selected_paper:
         st.markdown(f"**{t('Authors', language)}:** {', '.join(selected_paper['authors']) or t('Unknown', language)}")
         st.markdown(f"**{t('Year', language)}:** {selected_paper['year'] or t('Unknown', language)}")
         st.markdown(f"**{t('Venue', language)}:** {selected_paper['venue'] or t('Unknown', language)}")
+        if st.button(
+            "📄 " + t("Open PDF in default browser", language), key="open_paper_pdf",
+        ):
+            try:
+                open_paper_pdf(settings.inbox_dir, selected_paper)
+            except PDFAccessError as exc:
+                st.warning(t(str(exc), language))
         st.markdown(f"**{t('Abstract', language)}**")
         st.write(selected_paper["abstract"] or t("No abstract could be extracted.", language))
         st.markdown(f"**{t('Keywords', language)}:** {', '.join(selected_paper['keywords']) or t('None extracted', language)}")
@@ -291,7 +299,6 @@ if selected_paper:
         st.markdown(
             f"**{t('Confidence', language)}:** {selected_paper['effective_relevance_confidence'] if selected_paper['effective_relevance_confidence'] is not None else t('Unknown', language)}"
         )
-        st.code(selected_paper["filepath"], language=None)
         if selected_paper["classification_error"]:
             st.warning(t("AI classification unavailable: {error}", language,
                          error=t(selected_paper['classification_error'], language)))
