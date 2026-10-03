@@ -10,9 +10,119 @@ from streamlit.testing.v1 import AppTest
 from src.database import Database
 from src.models import ClassificationResult, ExtractedMetadata
 from src.config import get_settings
-from src.i18n import t
+from src.i18n import display_enum, t
 from src.pdf_access import BROWSER_FAILED, PDF_UNAVAILABLE
 from src.pdf_parser import sha256_file
+
+
+@pytest.mark.parametrize("language", ["ja", "en", "ko"])
+def test_sidebar_order_and_existing_widget_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str,
+) -> None:
+    settings = get_settings(tmp_path)
+    database = Database(settings.database_path)
+    database.initialize()
+    for index, year in enumerate((2023, 2025)):
+        database.add_paper(
+            file_hash=str(index) * 64, filename=f"fixture-{index}.pdf",
+            filepath=f"fixture-{index}.pdf",
+            metadata=ExtractedMetadata(title=f"Sidebar fixture {index}", year=year),
+            classification=None,
+        )
+    monkeypatch.setattr("src.config.get_settings", lambda: settings)
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"))
+    app.session_state["ui_language"] = language
+    app.session_state["scan_results"] = [
+        {"filename": "existing.pdf", "status": "Skipped", "message": "Already registered"},
+    ]
+    app.run(timeout=15)
+    assert not app.exception
+    sidebar = list(app.sidebar)
+    # AppTest iteration includes the container itself before its rendered elements.
+    assert sidebar[1].key == "ui_language"
+    assert app.sidebar.selectbox[0].options == ["日本語", "English", "한국어"]
+    assert [item.value for item in app.sidebar.header] == [
+        t("Library", language), t("Search & filters", language), t("Classifier", language),
+    ]
+    assert app.sidebar.button(key="scan_inbox").label == t("Scan papers/inbox", language)
+    assert app.sidebar.expander[0].label == t("Last scan results", language)
+    assert {item.key for item in app.sidebar.multiselect} == {
+        "filter_categories", "filter_tags", "filter_methods", "filter_vulnerabilities",
+        "filter_relevances", "filter_statuses", "filter_classification_statuses",
+    }
+    assert app.sidebar.text_input[0].key == "filter_keyword"
+    assert app.sidebar.slider[0].key == "filter_years"
+    assert sidebar.index(app.sidebar.slider[0]) < sidebar.index(app.sidebar.header[-1])
+    captions = [item.value for item in app.sidebar.caption]
+    assert captions[-3:] == [
+        f"{t('Provider', language)}: {settings.classifier_provider}",
+        f"{t('Model', language)}: {settings.classifier_model or t('Not configured', language)}",
+        t("Local processing on this PC" if settings.classifier_provider == "local"
+          else "Extracted classification input is sent to OpenAI", language),
+    ]
+
+
+@pytest.mark.parametrize("language", ["ja", "en", "ko"])
+@pytest.mark.parametrize("counts", [(), (1,), (1, 3)])
+def test_category_chart_has_nonnegative_integer_counts_and_zero_based_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str, counts: tuple[int, ...],
+) -> None:
+    database = Database(tmp_path / "category-chart.db")
+    database.initialize()
+    labels = ("Session Management", "Authentication")
+    index = 0
+    for label, count in zip(labels, counts):
+        for _ in range(count):
+            database.add_paper(
+                file_hash=f"{index:064x}", filename=f"fixture-{index}.pdf",
+                filepath=f"fixture-{index}.pdf",
+                metadata=ExtractedMetadata(title=f"Chart fixture {index}"),
+                classification=ClassificationResult(
+                    primary_category=label, tags=[], research_methods=[],
+                    target_vulnerabilities=[], relevance="A", relevance_reason="Chart fixture.",
+                    relevance_confidence=0.9,
+                ),
+            )
+            index += 1
+    monkeypatch.setenv("DATABASE_PATH", str(database.path))
+    expected = database.dashboard_counts()["categories"]
+    assert expected == dict(zip(labels, counts))
+    assert all(isinstance(count, int) and count >= 0 for count in expected.values())
+    charts = []
+    render_chart = st.altair_chart
+
+    def capture_chart(chart, **kwargs):
+        charts.append(chart.to_dict())
+        return render_chart(chart, **kwargs)
+
+    monkeypatch.setattr(st, "altair_chart", capture_chart)
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"))
+    app.session_state["ui_language"] = language
+    app.run(timeout=15)
+    assert not app.exception
+    if not counts:
+        assert not charts
+        assert any(item.value == t(
+            "Add PDFs to papers/inbox and run a scan to build the dashboard.", language,
+        ) for item in app.info)
+        return
+    assert len(charts) == 1
+    spec = charts[0]
+    assert spec["mark"]["type"] == "bar"
+    x, y = spec["encoding"]["x"], spec["encoding"]["y"]
+    assert x["field"] == t("Papers", language)
+    assert x["type"] == "quantitative"
+    assert x["scale"]["domainMin"] == 0
+    assert x["scale"]["zero"] is True
+    assert x["axis"]["format"] == "d"
+    assert x["axis"]["tickMinStep"] == 1
+    assert y["field"] == t("Category", language)
+    assert y["type"] == "nominal"
+    rows = spec["data"]["values"]
+    assert rows == [
+        {t("Category", language): display_enum(label, language), t("Papers", language): count}
+        for label, count in expected.items()
+    ]
 
 
 def test_library_dashboard_filters_detail_and_human_correction(
