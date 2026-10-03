@@ -311,8 +311,11 @@ class Database:
         ]
         if editable_columns:
             assignments = ", ".join(f"{name} = NULL" for name in editable_columns)
+            # SQLite can dirty pages even when an UPDATE assigns the same NULLs.
+            needs_cleanup = " OR ".join(f"{name} IS NOT NULL" for name in editable_columns)
             connection.execute(
-                f"UPDATE papers SET {assignments} WHERE manually_reviewed = 0"
+                f"""UPDATE papers SET {assignments} WHERE manually_reviewed = 0
+                    AND ({needs_cleanup})"""
             )
         for _, junction, _ in LABEL_TABLES.values():
             connection.execute(
