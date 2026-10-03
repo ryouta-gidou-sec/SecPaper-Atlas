@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 import json
+import hashlib
 import math
 from pathlib import Path
 import sqlite3
@@ -134,6 +135,33 @@ LABEL_TABLES = {
     ),
 }
 
+# Fixed identifiers only: controlled refresh never runs migrations or user SQL.
+SNAPSHOT_TABLES = (
+    "papers", "tags", "research_methods", "vulnerabilities", "paper_tags",
+    "paper_methods", "paper_vulnerabilities", "classification_runs", "sqlite_sequence",
+)
+METADATA_COLUMNS = (
+    "title", "authors_json", "year", "venue", "abstract", "introduction_excerpt",
+    "keywords_json", "metadata_sources_json", "metadata_review_reasons_json",
+)
+
+
+def snapshot_digest(snapshot: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(
+        snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+
+
+def metadata_values(metadata: ExtractedMetadata) -> tuple[Any, ...]:
+    metadata = ExtractedMetadata.model_validate(metadata.model_dump())
+    return (
+        metadata.title, json.dumps(metadata.authors, ensure_ascii=False), metadata.year,
+        metadata.venue, metadata.abstract, metadata.introduction_excerpt,
+        json.dumps(metadata.keywords, ensure_ascii=False),
+        json.dumps(metadata.metadata_sources, ensure_ascii=False),
+        json.dumps(metadata.review_reasons, ensure_ascii=False),
+    )
+
 
 class DuplicatePaperError(RuntimeError):
     """Raised when a file hash already exists."""
@@ -160,10 +188,69 @@ class Database:
     def __init__(self, path: Path) -> None:
         self.path = path.resolve()
 
+    def require_quiescent(self) -> None:
+        if any(Path(str(self.path) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")):
+            raise ValueError("Close database users and clear active SQLite sidecars first")
+
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.path, timeout=10)
+    def connect_readonly(self) -> Iterator[sqlite3.Connection]:
+        """Read a quiescent DB without initialization, migration or sidecar creation.
+
+        Immutable mode is safe only for a closed application with no journal/WAL.
+        The refresh coordinator additionally checks DB fingerprints before/after.
+        """
+        if not self.path.is_file():
+            raise ValueError("Database must already exist")
+        self.require_quiescent()
+        connection = sqlite3.connect(self.path.as_uri() + "?mode=ro&immutable=1", uri=True)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        try:
+            yield connection
+        finally:
+            connection.close()
+
+    @staticmethod
+    def snapshot(connection: sqlite3.Connection) -> dict[str, Any]:
+        """Exact local comparison data, including schema, labels and all history."""
+        return {
+            "schema": [list(row) for row in connection.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+            )],
+            "tables": {
+                table: [dict(row) for row in connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid')]
+                for table in SNAPSHOT_TABLES
+            },
+        }
+
+    @staticmethod
+    def update_metadata_only(
+        connection: sqlite3.Connection, paper_id: int, file_hash: str,
+        metadata: ExtractedMetadata,
+    ) -> None:
+        """Participate in a caller-owned batch transaction; change metadata only."""
+        cursor = connection.execute(
+            """UPDATE papers SET title = ?, authors_json = ?, year = ?, venue = ?,
+               abstract = ?, introduction_excerpt = ?, keywords_json = ?,
+               metadata_sources_json = ?, metadata_review_reasons_json = ?,
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+               WHERE id = ? AND file_hash = ?""",
+            (*metadata_values(metadata), paper_id, file_hash),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("Paper identity changed before metadata update")
+
+    @contextmanager
+    def connect(self, *, existing_only: bool = False) -> Iterator[sqlite3.Connection]:
+        if existing_only:
+            if not self.path.is_file():
+                raise ValueError("Database must already exist")
+            self.require_quiescent()
+            # mode=rw also refuses creation if the file disappears after this check.
+            connection = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=10)
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(self.path, timeout=10)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
@@ -424,48 +511,67 @@ class Database:
         if classification is not None:
             classification = ClassificationResult.model_validate(classification)
         with self.connect() as connection:
-            row = connection.execute(
-                "SELECT manually_reviewed FROM papers WHERE id = ?", (paper_id,)
-            ).fetchone()
-            if row is None:
-                raise KeyError(f"Paper {paper_id} does not exist")
-            self._record_classification(
-                connection, paper_id, classification, status, classification_error, provenance
+            self.write_classification(
+                connection, paper_id, classification, status=status,
+                error=classification_error, provenance=provenance,
+                processing_seconds=processing_seconds,
             )
-            if classification is None:
-                connection.execute(
-                    """UPDATE papers SET classification_status = ?, classification_error = ?,
-                       processing_seconds = COALESCE(?, processing_seconds),
-                       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?""",
-                    (status, classification_error, processing_seconds, paper_id),
-                )
-                return
 
-            category = classification.primary_category.value
-            relevance = classification.relevance.value
-            reason = classification.relevance_reason
-            confidence = classification.relevance_confidence
+    def write_classification(
+        self, connection: sqlite3.Connection, paper_id: int,
+        classification: ClassificationResult | None, *, status: str,
+        error: str | None, provenance: ClassificationProvenance,
+        processing_seconds: float | None,
+    ) -> None:
+        """Append a validated attempt inside an existing transaction."""
+        status = ClassificationStatus(status).value
+        provenance = ClassificationProvenance.model_validate(provenance)
+        processing_seconds = _validated_processing_seconds(processing_seconds)
+        if classification is not None:
+            classification = ClassificationResult.model_validate(classification)
+        classification_error = error
+        row = connection.execute(
+            "SELECT manually_reviewed FROM papers WHERE id = ?", (paper_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Paper {paper_id} does not exist")
+        self._record_classification(
+            connection, paper_id, classification, status, classification_error, provenance
+        )
+        if classification is None:
             connection.execute(
-                """UPDATE papers SET ai_primary_category = ?, ai_relevance = ?,
-                   ai_relevance_reason = ?, ai_relevance_confidence = ?,
-                   classification_status = ?, classification_error = NULL,
+                """UPDATE papers SET classification_status = ?, classification_error = ?,
                    processing_seconds = COALESCE(?, processing_seconds),
                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?""",
-                (category, relevance, reason, confidence, status, processing_seconds, paper_id),
+                (status, classification_error, processing_seconds, paper_id),
             )
-            self._replace_labels(connection, paper_id, "tags", classification.tags, "ai")
-            self._replace_labels(
-                connection, paper_id, "research_methods", classification.research_methods, "ai"
-            )
-            self._replace_labels(
-                connection,
-                paper_id,
-                "target_vulnerabilities",
-                classification.target_vulnerabilities,
-                "ai",
-            )
-            # A retry replaces AI-owned values only. It never seeds or overwrites
-            # the human-owned current values, regardless of review status.
+            return
+
+        category = classification.primary_category.value
+        relevance = classification.relevance.value
+        reason = classification.relevance_reason
+        confidence = classification.relevance_confidence
+        connection.execute(
+            """UPDATE papers SET ai_primary_category = ?, ai_relevance = ?,
+               ai_relevance_reason = ?, ai_relevance_confidence = ?,
+               classification_status = ?, classification_error = NULL,
+               processing_seconds = COALESCE(?, processing_seconds),
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?""",
+            (category, relevance, reason, confidence, status, processing_seconds, paper_id),
+        )
+        self._replace_labels(connection, paper_id, "tags", classification.tags, "ai")
+        self._replace_labels(
+            connection, paper_id, "research_methods", classification.research_methods, "ai"
+        )
+        self._replace_labels(
+            connection,
+            paper_id,
+            "target_vulnerabilities",
+            classification.target_vulnerabilities,
+            "ai",
+        )
+        # A retry replaces AI-owned values only. It never seeds or overwrites
+        # the human-owned current values, regardless of review status.
 
     @staticmethod
     def _record_classification(

@@ -17,9 +17,11 @@ Version 0.1.1 is a local, inspectable classification pipeline. It prioritizes so
 | `src/ollama_classifier.py` | Local model preflight and JSON Schema requests with bounded retry | Loopback only; no cloud inference or model download |
 | `src/database.py` | Own schema, transactions, bound SQL, search, and human-review updates | Persists private local research data |
 | `src/scanner.py` | Orchestrate stages and isolate failures per paper | Does not mutate input files |
+| `src/metadata_refresh.py` | Preflight an entire registered library, update metadata atomically, and retry only changed classification inputs | Read-only evidence first; hash/ID identity, verified backups and stale-state rejection |
 | `src/i18n.py` | Translate UI text and enum display labels into Japanese, English, or Korean | Presentation only; never translates paper text or stored values |
 | `app.py` | Present dashboard, filters, detail, scan controls, and review form | User-facing local interface |
 | `scripts/evaluate.py` | Compare human labels with AI primary-category output and report accuracy / per-category metrics | Reads an explicitly prepared local CSV or successful run history and Human Review categories from SQLite in read-only mode |
+| `scripts/refresh_metadata.py` | Explicit dry-run, metadata apply and targeted retry modes for the audited 40-paper library | Private evidence under ignored `data/`; no implicit write or classifier mode |
 
 ## Data flow
 
@@ -247,6 +249,143 @@ Nullable papers columns `classification_provider` (local/openai), `classificatio
 New `classification_runs` rows retain provider/model, validated result JSON or sanitized failure, UTC classification time for successes, and creation time. Run insertion, latest AI update and labels share a transaction. Retries replace the latest AI projection but retain all previous originals in history; Human Review never edits that history or gets overwritten by retries. Existing AI rows are snapshotted once, with unknown historical provider/model/date left null. Old failures keep their diagnostics without invented provenance. Migration is idempotent.
 
 Normal scans skip classified hashes regardless of provider changes. Explicit `reclassify=True` enables deliberate comparison runs. Evaluation reads successful history and current human labels read-only, groups by provider/model, and uses the latest success per hash per group. The original CSV metrics remain available. Human Review categories are not automatically independent Ground Truth; evaluation references require a fixed rubric and separate human judgment. The multi-field v0.1.1 pilot in [EVALUATION_RESULTS.md](EVALUATION_RESULTS.md) used local helper scripts; the public CLI evaluates primary category only.
+
+### Controlled metadata refresh
+
+The regular scanner retries existing records through metadata and classification
+writes. Its `update_metadata()` also updates classification status/error, and its
+paper-level failure boundary can leave a partial library refresh. It therefore
+is not the entry point for applying extractor improvements to classified papers.
+The controlled workflow is separate; normal scan behavior and migrations remain
+unchanged. No schema additions are required.
+
+Close Streamlit and other database users before running the controlled CLI. It
+requires an existing, quiescent SQLite database with no WAL, SHM or journal
+sidecars. It rejects sidecars rather than deleting them or checkpointing the DB.
+Read-only snapshots use `mode=ro&immutable=1` and `query_only=ON`, with physical
+SHA-256/size/mtime checks before and after. Immutable mode is used only with this
+quiescence requirement. The CLI never calls `Database.initialize()`; existing
+migration same-value UPDATE behavior is outside this workflow's scope.
+
+```powershell
+python -m scripts.refresh_metadata --dry-run
+```
+
+Dry-run locally reparses every PDF and extracts metadata without creating a
+classifier, loading provider settings, creating logs or opening a writable DB.
+Every `.pdf` candidate is checked, including malformed candidates the ordinary
+scanner would skip. Resolved containment, signature, count, unique SHA-256 and
+the complete DB/inbox hash sets must agree. Filenames are descriptive; ID plus
+hash identifies a paper. Renamed files can match by hash; unknown, changed,
+duplicate or missing PDFs block apply. PDF SHA-256, size and mtime are checked
+again after extraction. Exceptions expose only paper IDs and exception types.
+
+The CLI requires 40 papers and independently derives the changed-input set by
+exactly comparing title, abstract, keywords and introduction excerpt against the
+stored metadata. The audited manifest freezes the derived expected count and set.
+It cross-checks `phase-a-report.md`, `phase-a-final.json`, `phase-b-final.json` and
+`phase-a-protected.json` under local `data/metadata-audit-40/`: all original inputs,
+IDs, filenames and PDF hashes must agree, Phase A outputs must agree with Phase B
+inputs/outputs in all 160 input fields, and today's extractor must agree with
+Phase B. Any mismatch or new extractor review/input issue prevents apply.
+Bibliographic and provenance changes alone never create retry targets.
+Phase A primary and secondary scopes come from the audit evidence, rather than
+an ID allowlist. The evidence checks each stored old input against Phase A old,
+Phase A new against Phase B old/new, and the current extraction against Phase B
+new: 160 fields at each boundary. The complete changed-input set is derived from
+all four fields for every paper. Primary scope is not the expected candidate set.
+
+`src/refresh_manifest.py` freezes a PDF-reviewed observation under ignored
+`data/metadata-refresh/refresh-manifest.json`. It records corpus size, DB IDs,
+physical DB hash/size/mtime and logical snapshot hash, every PDF hash/size/mtime,
+metadata-changed/input-changed/bibliographic-only sets, per-paper identity,
+old/new full-metadata hashes and four input-diff flags, phase evidence hashes,
+UTC timestamp, base commit, and working source hashes (including uncommitted
+extractor, parser, storage and guard changes). Matching IDs alone cannot pass.
+
+Every raw candidate needs an explicit A/B/C decision, source page and evidence.
+A means an intended substantive improvement and a retry target. B is a reviewed
+format-only change; a narrow equality check permits whitespace, an orphan initial
+Abstract-heading period, and splitting middle-dot keywords while preserving
+word content, case and order. Removing Content Warning, ACM classification or
+footnote words is substantive under this policy. C blocks freezing. This policy
+judges metadata content; it does not claim identical future model outputs.
+The freeze factory is separate from the CLI and is called only after PDF review.
+Reclassification IDs are derived from A decisions; all raw diffs remain recorded.
+
+The CLI requires the frozen manifest and its independently reviewed canonical
+SHA-256 for either write mode. A fresh read-only dry-run with that manifest must
+match the entire observation and source identity before the plan is bound to its
+digest. An unbound dry-run remains diagnostic (`production_write_ready=false`).
+A changed corpus, same-ID value change, missing/extra candidate, audit/code drift,
+unchecked format exception, or stale digest rejects before backups or DB writes.
+A source change or later commit requires a new freeze and reviewed dry-run.
+Generic library calls without a manifest retain the original all-raw-diffs retry
+behavior for compatibility; they cannot use any format-only exclusions. The
+production CLI always requires a bound manifest and count 40.
+
+Local evidence uses exclusive, timestamp/UUID names under ignored
+`data/metadata-refresh/`. The baseline records paper fields except absolute
+filepath, raw AI/current label values and every classification run. This is
+preservation evidence; AI results are not used to judge metadata correctness.
+The plan stores bounded old/new metadata and ID/hash pairs. The readable report
+contains change flags and review reasons, without paper bodies or absolute paths.
+Neither the evidence nor any research data belongs in Git.
+
+The later, explicitly requested write steps are:
+
+```powershell
+python -m scripts.refresh_metadata --apply --plan data/metadata-refresh/REVIEWED-plan.json --manifest data/metadata-refresh/refresh-manifest.json --manifest-sha256 REVIEWED_DIGEST
+python -m scripts.refresh_metadata --reclassify --provider local --plan data/metadata-refresh/REVIEWED-plan.json --receipt data/metadata-refresh/APPLIED-receipt.json --manifest data/metadata-refresh/refresh-manifest.json --manifest-sha256 REVIEWED_DIGEST
+```
+
+Metadata apply repeats the full read-only preflight and extraction, checks the
+reviewed plan digest and evidence, then opens one `BEGIN IMMEDIATE` transaction.
+The controlled writer uses `mode=rw` on an existing DB and refuses file creation.
+It checks the complete logical DB snapshot under the write lock, checks PDFs
+again, and creates a byte-exact, fsynced backup with exclusive file creation in
+`data/backups/`. Backup names use UTC timestamp plus UUID; an existing file is
+never overwritten. Backup SHA-256 must match the baseline. With no WAL and the
+reserved write lock held, copying the source file captures a consistent DB.
+Backup failure prevents writes. A backup is retained if a later write rolls back.
+
+Only changed metadata rows are updated, using parameters and an ID/hash WHERE
+clause. Allowed columns are title, authors_json, year, venue, abstract,
+introduction_excerpt, keywords_json, metadata_sources_json and
+metadata_review_reasons_json, plus updated_at. AI fields/labels, human/current
+fields/labels, manually_reviewed, status, classification_status/error,
+provider/model/time/duration, created_at, identities, and every history row remain
+exactly equal. A full snapshot comparison checks these invariants before commit,
+including effects of triggers. Any failure rolls back all metadata changes.
+The apply receipt binds the plan digest to the resulting full DB snapshot and
+the backup filename. There is no classification call during apply.
+
+Targeted reclassification requires that receipt, the unchanged applied snapshot,
+unchanged PDFs, exact refreshed metadata and the verified original backup. Old
+inputs are checked against the backup so altered plans cannot invent historical
+changes. Only the manifest-derived substantive A ID/hash pairs from that plan are submitted, through
+the existing provider protocol. Payloads contain title, abstract and keywords;
+the bounded introduction excerpt is provided only when the abstract is absent.
+No bibliography, paths, hashes, human labels or PDF bodies reach the provider.
+
+Generation occurs before a write lock. The entire receipt-bound DB state is
+checked again under `BEGIN IMMEDIATE`; a concurrent review or scan discards staged
+results rather than overwriting it. Another verified backup precedes persistence.
+All targeted attempts are committed in one batch using the same classification
+writer as normal scans. Success replaces only the latest AI projection and
+provenance and appends a run; failure appends a sanitized failed run and retains
+the previous successful AI values/provenance. Human/current values, review flags,
+reading status, metadata, previous history and all non-target papers are verified
+unchanged before commit. The receipt cannot be replayed after a batch changes the
+DB. Failed targets require a new reviewed recovery plan; there is no automatic
+retry or restart of all 40 papers. External provider calls already made cannot
+be rolled back if a concurrency or persistence check later rejects the batch.
+
+For recovery, retain both the original plan/receipt and backups. With all DB users
+closed, review the relevant verified backup before any separately authorized
+restore; the workflow never automatically restores or deletes research data.
+The local receipt is the required continuation artifact. If evidence output
+fails after commit, preserve the DB/backup and inspect the state before proceeding.
 
 ## PDF processing and source integrity
 
