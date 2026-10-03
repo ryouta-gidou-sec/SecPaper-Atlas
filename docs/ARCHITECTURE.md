@@ -163,6 +163,22 @@ Scalar AI/current pairs preserve provenance:
 
 `manually_reviewed` distinguishes untouched AI output from a review. Before the first explicit review, current scalar fields and current label rows remain empty; classification writes only `ai_*` fields and `value_source='ai'` rows. Read and search results expose effective values without persisting a copy: AI values are the display/filter fallback while `manually_reviewed=0`, and current values take over after a review save. AI retries update only AI-owned values and never overwrite current values. Initialization adds missing workflow columns and clears the old AI-to-current projection only for unreviewed rows; reviewed rows and all AI originals are preserved. `classification_status` records `pending`, `classified`, `failed`, or `needs_review`; pending and failed records can be retried when scanning the inbox again. A needs-review record is re-extracted and is only sent when its input passes the quality gate. `classification_error` allows extraction results to survive an API or validation failure.
 
+### Initialization and legacy migrations
+
+Initialization is physically idempotent for a fully migrated SQLite database:
+repeated calls leave its bytes, size, header change counter, modification time,
+schema and logical snapshot unchanged. The legacy scalar projection cleanup
+updates an unreviewed row only when at least one editable column present in its
+schema is non-NULL. Current-label cleanup deletes only existing `current` rows
+belonging to unreviewed papers; AI labels and reviewed current values are retained.
+Missing tables/indexes and workflow columns are still created, pending legacy
+statuses are migrated when applicable, and legacy AI history is backfilled only
+for papers with no existing classification run. These required migrations may
+write on the first initialization; subsequent initialization performs no physical
+change once migration is complete. Temporary-database regression tests compare
+raw bytes/SHA-256, size, header counter, a fixed old mtime, and the complete logical
+snapshot, including classification history.
+
 ### Processing duration
 
 `papers.processing_seconds` is the wall-clock duration in seconds of the latest
