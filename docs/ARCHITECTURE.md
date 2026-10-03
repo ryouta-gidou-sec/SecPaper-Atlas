@@ -9,9 +9,10 @@ Version 0.1.1 is a local, inspectable classification pipeline. It prioritizes so
 | Component | Responsibility | Trust boundary |
 |---|---|---|
 | `src/config.py` | Resolve application-owned paths and environment settings; configure rotating logs | Reads secrets from local environment only |
-| `src/pdf_parser.py` | Discover contained files, check signatures, hash content, extract bounded text and first-two-page block geometry/direction | Parses untrusted PDFs locally, read-only |
+| `src/pdf_parser.py` | Discover contained files, check signatures, hash content, extract bounded text and first-two-page block/line geometry and explicit publication properties | Parses untrusted PDFs locally, read-only |
 | `src/pdf_access.py` | Locate a registered PDF by filename/hash, validate it, and open a file URI in the default browser | Contained local source files only; no serving or PDF writes |
 | `src/metadata_extractor.py` | Recover conservative bibliographic fields, provenance, and review reasons | Treats extracted text as untrusted data |
+| `src/bibliography.py` | Separate author rows from affiliations and recover evidence-backed publication year/venue | Local front matter and explicit properties only; no inferred names or publication facts |
 | `src/classifier.py` | Common protocol, minimal input/prompt/schema, validation, factory and optional OpenAI provider | External paper disclosure only when OpenAI is selected |
 | `src/ollama_classifier.py` | Local model preflight and JSON Schema requests with bounded retry | Loopback only; no cloud inference or model download |
 | `src/database.py` | Own schema, transactions, bound SQL, search, and human-review updates | Persists private local research data |
@@ -58,7 +59,7 @@ sequenceDiagram
     UI->>DB: Update current values only
 ```
 
-The parser may inspect up to 12 pages locally to find front matter, abstract, keywords, and an introduction excerpt. Only the first two pages retain block geometry, maximum span font sizes, and line directions. Mixed orientations are separated into distinct blocks; each retained block is bounded to 6,000 characters. These layouts are transient and do not change the database schema. The entire extracted text is never passed to the classifier. Abstracts are capped at 6,000 characters; introduction excerpts are used only when an abstract is absent and are capped at 2,500 characters. PDF creation and modification dates are not considered publication years.
+The parser may inspect up to 12 pages locally to find front matter, abstract, keywords, and an introduction excerpt. Only the first two pages retain block geometry, maximum span font sizes, line directions, and individual line geometry/text for author extraction. Mixed orientations are separated into distinct blocks; each retained block and line is bounded to 6,000 characters. These layouts are transient and do not change the database schema. Explicit PDF Info Year/PublicationYear/PublicationDate and PRISM publicationDate/coverDate or DCTERMS issued properties are also read locally. XMP is bounded to 128,000 characters and documents with DTD/entity declarations are ignored. Generic XMP dates and PDF creation/modification dates are not publication years. The entire extracted text is never passed to the classifier. Abstracts are capped at 6,000 characters; introduction excerpts are used only when an abstract is absent and are capped at 2,500 characters.
 
 Title extraction retains the existing top-quarter first-page layout and PDF-property
 priority, excluding rotated/vertical margin text, arXiv identifier labels,
@@ -72,8 +73,42 @@ cover layout`. If a proceedings cover still has no usable title, the second page
 must contain a usable title and an abstract/section heading before its layout is
 accepted, with `second page layout` provenance. This also aligns abstract and author
 extraction with the article page; publication year and venue still use the first page.
-Cover title geometry is not used to infer authors from mixed
-name/affiliation rows; existing PDF author properties retain their priority.
+For modern proceedings covers, authors independently use the second-page title
+region only when its title corroborates the recovered cover title. This route does
+not change the Phase A abstract/keyword/introduction selection.
+
+Bibliographic rules live in `src/bibliography.py`, separately from classification
+input heuristics. Authors are read from horizontal lines between title and the
+first abstract/section/unlabeled prose boundary, with a 300-point maximum region.
+Line boundaries prevent institution prefixes from being appended to names.
+Inline name/affiliation rows use the name before the first comma; institution,
+contact and address rows are excluded. Markers, initials, Unicode accents,
+surname particles and wrapped names are supported. A corroborated PDF Author
+property keeps `PDF metadata` provenance; a differing or incomplete property is
+superseded by usable article author rows with `first page layout` or `second page
+layout` provenance. Valid author properties remain a fallback when no usable
+article author region exists. Missing authors alone never hold classification.
+
+Publication year candidates have explicit priorities: (4) journal volume/citation
+and Published fields, (3) conference/proceedings headers or separate dates on an
+identified proceedings cover, (2) explicit publication-year/date properties,
+(1) copyright lines. Conflicting years at the highest available priority return
+NULL, rather than choosing the most recent year. Submission, receipt, acceptance,
+revision, retrieval/access dates, arXiv dates, and dates for an abridged/other
+version are excluded. A Published field remains usable on a line that also lists
+Received/Accepted dates. The sparse source map records journal/proceedings or
+publication headers, proceedings dates, `PDF metadata`, and copyright lines.
+NULL years have no fabricated source. Proceedings venues additionally distinguish
+identified cover pages, ordinary headers and lower-page citation footers in the
+existing string-valued source map.
+
+Venues require a conference, workshop, proceedings or journal signal. Wrapped
+USENIX/SOUPS headers, NDSS/ESORICS citation blocks and journal names followed by
+a separate volume line are supported. Abbreviations are retained as printed;
+publisher, institution, city and generic PDF Subject strings do not establish a
+venue. Missing venues remain NULL. Bibliographic extraction has no external
+lookup or provider calls and changes no storage contracts, AI originals, human
+review values or classification quality-gate rules.
 
 Abstract labels accept case variations and explicit delimiters. A standalone
 `Summary` label or a delimited `Summary:`/`Summary—` label is also eligible before

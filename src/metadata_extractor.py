@@ -6,6 +6,11 @@ import re
 from pathlib import Path
 from typing import Iterable
 
+from src.bibliography import (
+    extract_authors as _extract_authors,
+    extract_year as _extract_year,
+    extract_venue as _extract_venue,
+)
 from src.models import ExtractedMetadata
 from src.pdf_parser import PDFTextBlock, ParsedPDF
 
@@ -79,8 +84,19 @@ def extract_metadata(parsed: ParsedPDF, filename: str) -> ExtractedMetadata:
             article_text, article_blocks = body_page.text, body_page.blocks
     title_bottom = max((item.y1 for item in title_blocks), default=0.0)
 
-    authors, authors_source = _extract_authors(parsed.metadata, article_blocks, title_bottom)
-    if authors_source == "first page layout" and article_blocks is not blocks:
+    author_blocks, author_bottom = article_blocks, title_bottom
+    if _is_proceedings_cover(first_page) and len(parsed.page_layouts) > 1:
+        body_page = parsed.page_layouts[1]
+        body_title, body_title_blocks = _layout_title(body_page.blocks, body_page.size[1])
+        # Corroborate the article before using its author region. Keep the Phase
+        # A article/abstract route unchanged when a modern cover supplied title.
+        if body_title and title and re.sub(r"\W", "", body_title.casefold()) == re.sub(
+            r"\W", "", title.casefold()
+        ):
+            author_blocks = body_page.blocks
+            author_bottom = max((b.y1 for b in body_title_blocks), default=0.0)
+    authors, authors_source = _extract_authors(parsed.metadata, author_blocks, author_bottom)
+    if authors_source == "first page layout" and author_blocks is not blocks:
         authors_source = "second page layout"
     abstract, abstract_source = _extract_labeled_abstract(article_text, article_blocks)
     if abstract_source and article_blocks is not blocks:
@@ -303,127 +319,6 @@ def _is_bad_title(value: str) -> bool:
     )
 
 
-def _extract_authors(
-    metadata: dict[str, str], blocks: tuple[PDFTextBlock, ...], title_bottom: float
-) -> tuple[list[str], str | None]:
-    metadata_authors = _split_authors(metadata.get("author", ""))
-    if metadata_authors:
-        return metadata_authors, "PDF metadata"
-
-    if not blocks:
-        return [], None
-    ordered = sorted(blocks, key=lambda item: (item.y0, item.x0))
-    stop_y = min(
-        (item.y0 for item in ordered if _is_abstract_or_section_heading(item.text)),
-        default=title_bottom + 150.0,
-    )
-    candidates: list[str] = []
-    for block in ordered:
-        if block.y0 < title_bottom - 1 or block.y0 >= stop_y or block.y0 > title_bottom + 180:
-            continue
-        text = _normalize_text(block.text)
-        if not text:
-            continue
-        if EMAIL_RE.search(text) or _looks_like_affiliation(text):
-            if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", text):
-                continue
-            if re.match(
-                r"(?i)^(?:national|nanyang|university|department|faculty|institute|"
-                r"college|laboratory|lab\b|school|information processing society)\b",
-                text.lstrip(" †‡⋆∗*"),
-            ):
-                continue
-            # Some English author blocks put the name before an affiliation in
-            # the same text box; retain only the leading name portion.
-            leading = re.split(
-                r"(?i)\b(?:CISPA|Saarland|University|Institute|Department|SAP SE)\b|"
-                r"大学|大学院|研究科|学部|情報基盤|センター|機構",
-                EMAIL_RE.sub("", text),
-                maxsplit=1,
-            )[0].strip()
-            if not leading or not _looks_like_author_candidate(leading):
-                continue
-            text = leading
-        if block.y0 > title_bottom + 70.0:
-            continue
-        if _looks_like_author_candidate(text):
-            candidates.extend(_split_authors(text))
-    authors = _dedupe(candidates)
-    return authors, "first page layout" if authors else None
-
-
-def _split_authors(value: str) -> list[str]:
-    cleaned = EMAIL_RE.sub("", value)
-    cleaned = re.sub(r"\([^)]*@[^)]*\)", "", cleaned)
-    marked_names = re.findall(
-        r"([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})\s*\d+\s*,?\s*[a-z]?\)?",
-        cleaned,
-    )
-    if marked_names:
-        return [item.strip() for item in _dedupe(marked_names) if _looks_like_author_name(item)]
-    cleaned = re.sub(r"[†‡⋆∗*]+", " ", cleaned)
-    cleaned = re.sub(r"\d+\s*,?\s*[a-z]\)?", " ", cleaned, flags=re.I)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,;，、&")
-    if _looks_like_affiliation(cleaned):
-        cleaned = re.split(
-            r"(?i)\b(?:university|institute|department|faculty|school|lab\.?|campus|"
-            r"cispa|saarland|sap se)\b|大学|大学院|研究科|学部|情報基盤|センター|機構",
-            cleaned,
-            maxsplit=1,
-        )[0]
-    parts = re.split(r"\s*(?:;|；|,|，|、|&|\band\b)\s*", cleaned, flags=re.I)
-    results: list[str] = []
-    for part in parts:
-        part = part.strip(" .,;，、&")
-        if not part:
-            continue
-        # Japanese and Chinese author rows commonly separate names with spaces.
-        if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", part):
-            results.extend(
-                token.strip(" .,;，、†‡⋆*0123456789()")
-                for token in re.split(r"\s+", part)
-                if token.strip(" .,;，、†‡⋆*0123456789()")
-            )
-        else:
-            results.append(part)
-    return [item for item in _dedupe(results) if _looks_like_author_name(item)]
-
-
-def _looks_like_author_candidate(value: str) -> bool:
-    if not value or len(value) > 160 or EMAIL_RE.search(value):
-        return False
-    if re.search(r"(?i)received|accepted|copyright|regular paper|abstract|keywords", value):
-        return False
-    if re.search(r"\b(?:19|20)\d{2}\b", value):
-        return False
-    if len(value.split()) > 28:
-        return False
-    if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", value) and len(value) > 100:
-        return False
-    if re.match(r"(?i)^(?:national|nanyang|technological)\b", value.lstrip(" †‡⋆∗*")):
-        return False
-    if not re.search(r"[\u3040-\u30ff\u3400-\u9fff]", value):
-        tokens = re.findall(r"[A-Za-z][A-Za-z.'-]*", value)
-        if len(tokens) < 2:
-            return False
-    return any(char.isalpha() or "\u3040" <= char <= "\u9fff" for char in value)
-
-
-def _looks_like_author_name(value: str) -> bool:
-    if not value or len(value) > 80 or _looks_like_affiliation(value):
-        return False
-    if re.search(r"(?i)@|received|accepted|copyright|http|www\.", value):
-        return False
-    if re.match(r"(?i)^(?:national|nanyang|technological)\b", value):
-        return False
-    if len(value) < 2 or len(value.split()) > 5:
-        return False
-    if not re.search(r"[\u3040-\u30ff\u3400-\u9fff]", value):
-        if len(re.findall(r"[A-Za-z][A-Za-z.'-]*", value)) < 2:
-            return False
-    return bool(re.search(r"[A-Za-z\u3040-\u30ff\u3400-\u9fff]", value))
-
-
 def _extract_labeled_abstract(
     text: str, blocks: tuple[PDFTextBlock, ...]
 ) -> tuple[str | None, str | None]:
@@ -644,90 +539,6 @@ def _extract_introduction_from_blocks(blocks: tuple[PDFTextBlock, ...]) -> str |
     if start is None:
         return None
     return _extract_introduction("\n".join(item.text for item in ordered[start:]))
-
-
-def _extract_year(
-    metadata: dict[str, str], text: str, blocks: tuple[PDFTextBlock, ...]
-) -> tuple[int | None, str | None]:
-    lines = _front_page_lines(text, blocks)
-    scored: list[tuple[int, int, str]] = []
-    for line in lines:
-        lower = line.casefold()
-        if re.search(r"received|accepted|submitted|revised|accessed", lower):
-            continue
-        candidates = re.findall(r"\b(?:19|20)\d{2}\b", line)
-        for raw_year in candidates:
-            year = int(raw_year)
-            score = 0
-            if re.search(r"(?i)\b(?:vol\.?\s*\d|\d+\s*\(\s*\d+\s*\)\s*:)", line):
-                score += 5
-            if re.search(r"(?i)\b(?:WWW|Computer Security Symposium|Proceedings|Conference)\b", line):
-                score += 5
-            if re.search(r"情報処理学会第\d+回全国大会|コンピュータソフトウェア", line):
-                score += 5
-            if re.search(r"(?i)copyright|©|\(c\)", line):
-                score += 4
-            if re.search(r"(?i)^published\s*[:：]?\s*20\d{2}\b", line):
-                score += 4
-            if re.search(r"(?i)arxiv:\S+.*\b\d{1,2}\s+[A-Za-z]{3}\s+20\d{2}\b", line):
-                score += 4
-            if score:
-                scored.append((score, year, line))
-    if not scored:
-        return None, None
-    score, year, _ = max(scored, key=lambda item: (item[0], item[1]))
-    return (year, "first page publication context") if score >= 4 else (None, None)
-
-
-def _extract_venue(
-    metadata: dict[str, str], text: str, blocks: tuple[PDFTextBlock, ...]
-) -> tuple[str | None, str | None]:
-    lines = _front_page_lines(text, blocks)
-    for line in lines:
-        normalized = " ".join(line.split())
-        lower = normalized.casefold()
-        if lower.startswith("reprinted from"):
-            continue
-        if re.search(r"(?i)\bInformation and Media Technologies\b", normalized):
-            return "Information and Media Technologies", "first page journal header"
-        journal = re.search(
-            r"(?i)^(.{3,120}?)\s*,?\s*(?:vol\.?\s*\d+|\d+\s*\(\s*\d+\s*\)\s*:)",
-            normalized,
-        )
-        if journal:
-            venue = journal.group(1).strip(" ,;:-")
-            if not _looks_like_affiliation(venue) and "reprinted" not in venue.casefold():
-                return venue, "first page journal header"
-        conference = re.search(r"Computer Security Symposium", normalized, re.I)
-        if conference:
-            return conference.group(0), "first page proceedings header"
-        ipsj = re.search(r"情報処理学会第\d+回全国大会", normalized)
-        if ipsj:
-            return ipsj.group(0), "first page proceedings header"
-        if re.search(r"\bWWW\s+20\d{2}\b", normalized):
-            return "WWW", "first page proceedings footer"
-
-    # PDF /Subject is often a generic description. Accept it only when it
-    # corroborates an explicit journal or conference string on the page.
-    subject = _normalize_text(metadata.get("subject", ""))
-    if subject and any(subject.casefold() in line.casefold() for line in lines):
-        return subject[:180], "PDF metadata corroborated by first page"
-    return None, None
-
-
-def _front_page_lines(text: str, blocks: tuple[PDFTextBlock, ...]) -> list[str]:
-    values = [line.strip() for line in text.splitlines() if line.strip()]
-    for block in blocks:
-        values.extend(line.strip() for line in block.text.splitlines() if line.strip())
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        normalized = " ".join(value.split())
-        key = normalized.casefold()
-        if key not in seen:
-            seen.add(key)
-            result.append(normalized)
-    return result
 
 
 def _is_abstract_or_section_heading(value: str) -> bool:
