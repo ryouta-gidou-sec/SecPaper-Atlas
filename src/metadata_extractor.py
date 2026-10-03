@@ -34,7 +34,7 @@ SECTION_RE = re.compile(
 ABSTRACT_STOP_RE = re.compile(
     r"(?im)^[ \t]*(?:keywords?(?![A-Za-z0-9_])|key[ \t]+words?(?![A-Za-z0-9_])|"
     r"index[ \t]+terms?(?![A-Za-z0-9_])|キーワード|categories and subject descriptors|"
-    r"general terms|abstract(?![A-Za-z0-9_])|"
+    r"general terms|ccs concepts|acm classification|content warning|abstract(?![A-Za-z0-9_])|"
     r"summary(?=[ \t]*(?:$|[:：–—]))|概要|要旨|あらまし|"
     r"introduction(?![A-Za-z0-9_])|はじめに|"
     r"(?:\d{1,2}(?:\.\d+)*[.)]?|[IVX]+[.)])(?:[ \t]+\n?[ \t]*|\n[ \t]*)"
@@ -46,6 +46,17 @@ AFFILIATION_RE = re.compile(
     r"sap se)\b|大学|大学院|研究科|学部|研究所|情報基盤|センター|機構"
 )
 EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
+FRONT_NOISE_RE = re.compile(
+    r"(?im)^[ \t]*(?:[∗*†‡]\s*[A-Za-z]|"
+    r"authors[’']?\s+addresses|copyright\b|©|all rights reserved|"
+    r"permission to\b|this (?:work|article) is (?:an open access|licensed)|"
+    r"arxiv:\s*(?:\d{4}\.\d{4,5}|[a-z-]+/\d{7})|"
+    r"(?:email|e-mail|affiliation|address)\s*[:：]|"
+    r"(?:\S+@\S+)|ccs concepts\b|categories and subject descriptors\b|"
+    r"acm classification\b|content warning\b|usenix association\b|"
+    r"this paper is included in the proceedings of\b|"
+    r"network and distributed system security \(ndss\) symposium\b)"
+)
 
 
 def extract_metadata(parsed: ParsedPDF, filename: str) -> ExtractedMetadata:
@@ -59,27 +70,43 @@ def extract_metadata(parsed: ParsedPDF, filename: str) -> ExtractedMetadata:
     blocks = tuple(parsed.first_page_blocks)
     page_height = parsed.first_page_size[1] if parsed.first_page_size else None
     title, title_blocks, title_source = _extract_title(parsed.metadata, blocks, page_height)
+    article_text, article_blocks = first_page, blocks
+    if not title and _is_proceedings_cover(first_page) and len(parsed.page_layouts) > 1:
+        body_page = parsed.page_layouts[1]
+        body_title, body_title_blocks = _layout_title(body_page.blocks, body_page.size[1])
+        if body_title and any(_is_abstract_or_section_heading(b.text) for b in body_page.blocks):
+            title, title_blocks, title_source = body_title, body_title_blocks, "second page layout"
+            article_text, article_blocks = body_page.text, body_page.blocks
     title_bottom = max((item.y1 for item in title_blocks), default=0.0)
 
-    authors, authors_source = _extract_authors(parsed.metadata, blocks, title_bottom)
-    abstract, abstract_source = _extract_labeled_abstract(first_page, blocks)
+    authors, authors_source = _extract_authors(parsed.metadata, article_blocks, title_bottom)
+    if authors_source == "first page layout" and article_blocks is not blocks:
+        authors_source = "second page layout"
+    abstract, abstract_source = _extract_labeled_abstract(article_text, article_blocks)
+    if abstract_source and article_blocks is not blocks:
+        abstract_source = abstract_source.replace("first page", "second page")
     if not abstract and parsed.text and parsed.text != first_page:
         abstract, abstract_source = _extract_labeled_abstract(parsed.text, blocks)
         if abstract and abstract_source == "first page text":
             abstract_source = "bounded PDF text fallback"
     if not abstract:
-        abstract = _extract_unlabeled_abstract(blocks, title_bottom)
+        abstract = _extract_unlabeled_abstract(article_blocks, title_bottom, page_height)
         if abstract:
             abstract_source = "first page layout fallback"
 
     keywords = _extract_keywords(first_page)
     keywords_source = "first page text" if keywords else None
-    if not keywords and blocks:
-        keywords = _extract_keywords("", blocks)
-        keywords_source = "first page layout" if keywords else None
+    if blocks:
+        layout_keywords = _extract_keywords("", blocks)
+        if layout_keywords and layout_keywords != keywords:
+            keywords = layout_keywords
+            keywords_source = "first page layout"
     if not keywords and parsed.text and parsed.text != first_page:
         keywords = _extract_keywords(parsed.text)
         keywords_source = "bounded PDF text fallback" if keywords else None
+    if not keywords:
+        keywords = _split_keywords(parsed.metadata.get("keywords", ""))
+        keywords_source = "PDF metadata" if keywords else None
     year, year_source = _extract_year(parsed.metadata, first_page, blocks)
     venue, venue_source = _extract_venue(parsed.metadata, first_page, blocks)
 
@@ -143,7 +170,7 @@ def classification_input_issues(
         issues.append("A trustworthy title is required before classification.")
     if abstract and len(abstract.strip()) >= 80 and not _looks_like_diagram_or_noise(abstract):
         return issues
-    if introduction_excerpt and len(introduction_excerpt.strip()) >= 120:
+    if not abstract and introduction_excerpt and len(introduction_excerpt.strip()) >= 120:
         return issues
     issues.append("A usable abstract or bounded introduction excerpt is required.")
     return issues
@@ -175,6 +202,14 @@ def _extract_title(
     return None, (), "filename fallback"
 
 
+def _is_proceedings_cover(text: str) -> bool:
+    return bool(re.search(r"(?i)\bproceedings of (?:the\b|a\b)", text))
+
+
+def _is_horizontal(block: PDFTextBlock) -> bool:
+    return block.direction[0] >= 0.95 and abs(block.direction[1]) <= 0.1
+
+
 def _layout_title(
     blocks: tuple[PDFTextBlock, ...], page_height: float | None, *, is_cover: bool = False
 ) -> tuple[str | None, tuple[PDFTextBlock, ...]]:
@@ -186,7 +221,9 @@ def _layout_title(
     candidates = [
         item
         for item in blocks
-        if item.y0 <= cutoff and item.font_size >= 13.0 and _clean_title(item.text)
+        if item.y0 <= cutoff and item.font_size >= 13.0
+        and _is_horizontal(item) and item.x1 - item.x0 >= item.font_size * 2
+        and _clean_title(item.text) and not _is_abstract_or_section_heading(item.text)
     ]
     if not candidates:
         return None, ()
@@ -250,6 +287,18 @@ def _is_bad_title(value: str) -> bool:
         or "received:" in normalized
         or "accepted:" in normalized
         or normalized in {"unknown", "untitled", "paper"}
+        or re.match(
+            r"^arxiv\s*:\s*(?:\d{4}\.\d{4,5}|[a-z-]+/\d{7})(?:v\d+)?(?=\s|$)",
+            normalized,
+        )
+        or re.match(r"^proceedings\s+of\b", normalized)
+        or normalized in {"usenix association", "the usenix association"}
+        or re.fullmatch(
+            r"(?:main|paper|manuscript|submission|draft|document|untitled|output)"
+            r"(?:[-_](?:[a-z]+\d+|\d+|final|draft|camera[-_]?ready|rev\d*|copy))+"
+            r"(?:\.(?:pdf|tex|dvi))?", normalized,
+        )
+        or re.fullmatch(r"(?:main|manuscript|submission|document|output)\.(?:pdf|tex|dvi)", normalized)
         or (len(normalized) < 28 and re.fullmatch(r"[\d\W_]+", normalized))
     )
 
@@ -379,7 +428,9 @@ def _extract_labeled_abstract(
     text: str, blocks: tuple[PDFTextBlock, ...]
 ) -> tuple[str | None, str | None]:
     candidates: list[tuple[str, str]] = []
-    sources = [(text, "first page text"), *((item.text, "first page layout") for item in blocks)]
+    sources = [(text, "first page text"), *(
+        (value, "first page layout") for value in _labeled_layout_texts(blocks, ABSTRACT_RE)
+    )]
     for source_text, source_name in sources:
         for match in ABSTRACT_RE.finditer(source_text):
             # A later section named Summary is not a front-matter abstract.
@@ -390,8 +441,9 @@ def _extract_labeled_abstract(
                     continue
             body = source_text[match.end() :]
             body = _cut_at_first(body, ABSTRACT_STOP_RE)
-            if is_summary:
-                body = _cut_at_first(body, SECTION_RE)
+            body = _cut_at_first(body, SECTION_RE)
+            body = _cut_at_first(body, FRONT_NOISE_RE)
+            body = body.lstrip(" .：:–—-")
             cleaned = _clean_body(body)
             minimum_length = 20 if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", cleaned) else 40
             if len(cleaned) >= minimum_length and not _looks_like_diagram_or_noise(cleaned):
@@ -408,22 +460,86 @@ def _extract_labeled_abstract(
     )
 
 
+def _same_column(left: PDFTextBlock, right: PDFTextBlock) -> bool:
+    width = max(left.x1 - left.x0, 1.0)
+    return abs(left.x0 - right.x0) <= max(18.0, width * 0.1) and right.x1 <= left.x1 + 25
+
+
+def _labeled_layout_texts(
+    blocks: tuple[PDFTextBlock, ...], label_pattern: re.Pattern[str]
+) -> list[str]:
+    """Join adjacent paragraphs in the labeled column, retaining stop headings.
+
+    PDF block breaks are typographic, not semantic abstract boundaries. Never
+    extend into a second column or jump over a large gap to unrelated prose.
+    """
+    ordered = sorted((b for b in blocks if _is_horizontal(b)), key=lambda b: (b.y0, b.x0))
+    values: list[str] = []
+    for label in ordered:
+        if not label_pattern.match(label.text):
+            continue
+        parts = [label.text]
+        anchor = label
+        previous = label
+        standalone = not _clean_body(label_pattern.sub("", label.text)).strip(" .:–—-")
+        for item in ordered:
+            if item is label or item.y0 < previous.y1 - 3:
+                continue
+            if (_is_abstract_or_section_heading(item.text) or FRONT_NOISE_RE.match(item.text)) and (
+                anchor.x0 - 18 <= (item.x0 + item.x1) / 2 <= anchor.x1 + 18
+            ):
+                parts.append(item.text)
+                break
+            if standalone:
+                # A centered label may be narrower than its following paragraph.
+                if not (item.x0 - 18 <= (label.x0 + label.x1) / 2 <= item.x1 + 18):
+                    continue
+            elif not _same_column(anchor, item):
+                continue
+            if item.y0 - previous.y1 > max(32.0, previous.font_size * 3):
+                break
+            if item.font_size > anchor.font_size + 1.5:
+                break
+            parts.append(item.text)
+            if _is_abstract_or_section_heading(item.text) or FRONT_NOISE_RE.match(item.text):
+                break
+            if standalone:
+                anchor = item
+                standalone = False
+            previous = item
+        values.append("\n".join(parts))
+    return values
+
+
 def _extract_unlabeled_abstract(
-    blocks: tuple[PDFTextBlock, ...], title_bottom: float
+    blocks: tuple[PDFTextBlock, ...], title_bottom: float, page_height: float | None = None
 ) -> str | None:
-    ordered = sorted(blocks, key=lambda item: (item.y0, item.x0))
-    intro = next((item for item in ordered if _is_intro_heading(item.text)), None)
-    if intro is None:
+    if not title_bottom:
         return None
+    ordered = sorted((b for b in blocks if _is_horizontal(b)), key=lambda item: (item.y0, item.x0))
+    intro = next((item for item in ordered if _is_intro_heading(item.text)), None)
+    # With no first-page Introduction, require an author/affiliation region
+    # between the title and a contiguous prose summary, never arbitrary body text.
+    if intro is None and not any(
+        b.y0 >= title_bottom and _looks_like_affiliation(b.text) for b in ordered
+    ):
+        return None
+    stop_y = min(
+        (b.y0 for b in ordered if b.y0 >= title_bottom and _is_abstract_or_section_heading(b.text)),
+        default=(page_height or 800.0) * 0.85,
+    )
     candidates = [
         item
         for item in ordered
         if item.y0 >= title_bottom
-        and item.y0 < intro.y0
+        and item.y0 < stop_y
+        and item.font_size <= 12.5
         and len(_clean_body(item.text)) >= 180
         and not _looks_like_affiliation(item.text)
         and not _is_abstract_or_section_heading(item.text)
         and not _looks_like_diagram_or_noise(item.text)
+        and not FRONT_NOISE_RE.match(item.text)
+        and re.search(r"[.。]", item.text)
     ]
     if not candidates:
         return None
@@ -436,29 +552,55 @@ def _extract_unlabeled_abstract(
             len(_clean_body(item.text)),
         ),
     )
-    return _clean_body(chosen.text)[:6000] or None
+    selected = [chosen]
+    # Recover all paragraphs of the same summary, including those preceding the
+    # longest block; author rows and footnotes do not satisfy the prose checks.
+    for item in candidates:
+        if item is chosen or not _same_column(chosen, item):
+            continue
+        selected.append(item)
+    selected.sort(key=lambda b: b.y0)
+    contiguous: list[PDFTextBlock] = []
+    for item in selected:
+        if contiguous and item.y0 - contiguous[-1].y1 > 32:
+            if chosen in contiguous:
+                break
+            contiguous = []
+        contiguous.append(item)
+    return _clean_body("\n".join(b.text for b in contiguous))[:6000] or None
 
 
 def _extract_keywords(text: str, blocks: tuple[PDFTextBlock, ...] = ()) -> list[str]:
     values: list[str] = []
-    for source_text in (text, *(item.text for item in blocks)):
+    for source_text in (text, *_labeled_layout_texts(blocks, KEYWORD_RE)):
         for match in KEYWORD_RE.finditer(source_text):
+            # Metadata fields occur in front matter. Body examples and response
+            # templates on later pages must not become classification keywords.
+            preceding = source_text[:match.start()]
+            if INTRO_RE.search(preceding) or SECTION_RE.search(preceding):
+                continue
             tail = source_text[match.end() :]
-            next_heading = min(
-                (candidate.start() for candidate in _next_keyword_stop().finditer(tail)),
-                default=len(tail),
-            )
-            candidate = tail[:next_heading].strip()
-            if not candidate:
-                for line in tail.splitlines():
-                    if line.strip():
-                        candidate = line.strip()
-                        break
-            candidate = candidate.splitlines()[0].strip() if candidate else ""
+            tail = _cut_at_first(tail, SECTION_RE)
+            tail = _cut_at_first(tail, _next_keyword_stop())
+            tail = _cut_at_first(tail, FRONT_NOISE_RE)
+            candidate = re.split(r"\n[ \t]*\n", tail.strip(), maxsplit=1)[0]
             candidate = re.sub(r"^(?:[:：]\s*)", "", candidate)
-            candidate = re.sub(r"(?i)\b(?:keywords?|key words?|index terms?)\b", "", candidate)
-            values.extend(re.split(r"\s*(?:,|;|，|；|、|\|)\s*", candidate))
-    return [item.strip(" .。:：") for item in _dedupe(values) if len(item.strip()) <= 100]
+            values.extend(_split_keywords(candidate))
+    return _dedupe(values)
+
+
+def _split_keywords(value: str) -> list[str]:
+    candidate = _clean_body(value).strip(" .。:：")
+    if not candidate or len(candidate.split()) > 80 or FRONT_NOISE_RE.search(candidate):
+        return []
+    parts = [part.strip(" .。:：") for part in re.split(r"\s*[,;，；、|·•]\s*", candidate)]
+    # Reject an invalid field as a whole, rather than return truncated fragments.
+    if any(
+        len(p) > 100 or p.endswith(("-", "‐", "‑")) or EMAIL_RE.search(p)
+        or re.search(r"https?://", p) for p in parts
+    ):
+        return []
+    return _dedupe(parts)
 
 
 def _next_keyword_stop() -> re.Pattern[str]:
@@ -477,6 +619,19 @@ def _extract_introduction(text: str) -> str | None:
         if re.fullmatch(r"[\d .…·]+", first_line):
             continue
         body = _cut_at_first(body, SECTION_RE)
+        body = _cut_at_first(body, FRONT_NOISE_RE)
+        # Standalone contact/affiliation rows are not introduction prose. Stop
+        # conservatively at them rather than disclose a trailing author address.
+        lines = body.splitlines()
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if (re.match(
+                r"(?i)^(?:(?:department|faculty|school|institute|laboratory) (?:of|for)\b|"
+                r"university of\b|(?:[\w-]+\s+){1,4}university\s*$)", stripped,
+            ) and len(stripped.split()) <= 16
+                and not re.search(r"[.!?。．]$", stripped)):
+                body = "\n".join(lines[:index])
+                break
         cleaned = _clean_body(body)
         if len(cleaned) >= 80:
             return cleaned[:2500].strip()

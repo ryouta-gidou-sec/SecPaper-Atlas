@@ -9,7 +9,7 @@ Version 0.1.1 is a local, inspectable classification pipeline. It prioritizes so
 | Component | Responsibility | Trust boundary |
 |---|---|---|
 | `src/config.py` | Resolve application-owned paths and environment settings; configure rotating logs | Reads secrets from local environment only |
-| `src/pdf_parser.py` | Discover contained files, check signatures, hash content, extract bounded text and first-page block geometry | Parses untrusted PDFs locally, read-only |
+| `src/pdf_parser.py` | Discover contained files, check signatures, hash content, extract bounded text and first-two-page block geometry/direction | Parses untrusted PDFs locally, read-only |
 | `src/metadata_extractor.py` | Recover conservative bibliographic fields, provenance, and review reasons | Treats extracted text as untrusted data |
 | `src/classifier.py` | Common protocol, minimal input/prompt/schema, validation, factory and optional OpenAI provider | External paper disclosure only when OpenAI is selected |
 | `src/ollama_classifier.py` | Local model preflight and JSON Schema requests with bounded retry | Loopback only; no cloud inference or model download |
@@ -57,27 +57,56 @@ sequenceDiagram
     UI->>DB: Update current values only
 ```
 
-The parser may inspect up to 12 pages locally to find front matter, abstract, keywords, and an introduction excerpt. The first page's text blocks retain bounding boxes and dominant font sizes to help distinguish title, authors, headers, and section boundaries. The entire extracted text is never passed to the classifier. Abstracts are capped at 6,000 characters; introduction excerpts are used only when an abstract is absent and are capped at 2,500 characters. PDF creation and modification dates are not considered publication years.
+The parser may inspect up to 12 pages locally to find front matter, abstract, keywords, and an introduction excerpt. Only the first two pages retain block geometry, maximum span font sizes, and line directions. Mixed orientations are separated into distinct blocks; each retained block is bounded to 6,000 characters. These layouts are transient and do not change the database schema. The entire extracted text is never passed to the classifier. Abstracts are capped at 6,000 characters; introduction excerpts are used only when an abstract is absent and are capped at 2,500 characters. PDF creation and modification dates are not considered publication years.
 
 Title extraction retains the existing top-quarter first-page layout and PDF-property
-priority. If both fail, a proceedings-cover fallback requires the explicit
+priority, excluding rotated/vertical margin text, arXiv identifier labels,
+proceedings headers, association branding, and clear internal document names
+(workflow suffixes or document extensions). A valid PDF title remains the fallback
+after usable layout candidates. If both fail, a proceedings-cover fallback requires the explicit
 "This paper is included in the Proceedings of" text plus a USENIX conference URL
 or Security Symposium label. Only then may it search the top half of the first
 page and join overlapping, adjacent title lines. Its provenance is `first page
-cover layout`. Cover title geometry is not used to infer authors from mixed
+cover layout`. If a proceedings cover still has no usable title, the second page
+must contain a usable title and an abstract/section heading before its layout is
+accepted, with `second page layout` provenance. This also aligns abstract and author
+extraction with the article page; publication year and venue still use the first page.
+Cover title geometry is not used to infer authors from mixed
 name/affiliation rows; existing PDF author properties retain their priority.
 
 Abstract labels accept case variations and explicit delimiters. A standalone
 `Summary` label or a delimited `Summary:`/`Summary—` label is also eligible before
 body section headings; subsection names such as "Summary of the Recovery Phase"
-are excluded. Unlabeled prose is not promoted by this new label rule. Introduction
+are excluded. Adjacent blocks in the same column are joined to retain multiple
+abstract paragraphs; centered section headings also stop that column. Paragraph
+breaks do not end an abstract. Keywords, numbered sections, content warnings,
+ACM classification fields, copyright/license notices, footnotes, and contact fields
+are explicit boundaries. Unlabeled summaries require title geometry and prose before
+the first section. When that section is on a later page, the first page must also
+contain an author/affiliation region; contiguous summary paragraphs stop before
+footnotes and the page footer. Introduction
 fallback first retains the first-page routes, then searches the parser's bounded
 text if necessary. It accepts standalone, Arabic-numbered (including split-line
 numbers), and Roman-numbered headings, skips split table-of-contents entries
 followed by page numbers, and stops at the next numbered section or an explicit
 References/Bibliography/Acknowledgments heading. Later-page provenance is `bounded
-PDF text fallback`. The quality gate, classifier inputs, and storage schema remain
-unchanged; extraction alone does not change a persisted classification status.
+PDF text fallback`. Contact, affiliation, footnote, copyright and margin-label
+noise ends an introduction excerpt conservatively.
+
+Keywords use explicit front-matter labels and their column layout, support wrapped
+lines (including line-end hyphenation) and comma/semicolon/middle-dot separators,
+and stop at the next field or section. Bounded-text keyword matches after body
+sections are rejected, preventing response templates from being mistaken for
+metadata. Valid explicit PDF `/Keywords` properties are a final fallback; missing
+keywords are never inferred. Provenance remains field-specific.
+
+The shared quality gate also rejects clear arXiv/internal/proceedings false titles.
+A supplied unusable abstract cannot be rescued by an introduction that the provider
+would not send. These are narrow input checks, not a guarantee of complete metadata
+quality: missing authors/year, incomplete prose and plausible but incorrect values
+still require audit. Classifier payload fields, prompts, provider/model settings,
+and storage schema remain unchanged; extraction alone does not change persisted
+metadata or classification status.
 
 ## Database design
 
@@ -191,7 +220,7 @@ Normal scans skip classified hashes regardless of provider changes. Explicit `re
 4. Stream the file through SHA-256.
 5. Skip hashes already classified in SQLite; retry pending, failed, and review-held rows.
 6. Open with PyMuPDF in read-only mode and reject password-protected or malformed files.
-7. Extract text and first-page layout in memory. Never save changes to the document.
+7. Extract bounded text and first-two-page layout/direction in memory. Never save changes to the document.
 
 PDF filename changes produce the same hash and remain duplicates. Two byte-identical PDFs in different folders also map to one record.
 
