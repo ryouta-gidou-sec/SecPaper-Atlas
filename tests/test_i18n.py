@@ -32,6 +32,8 @@ REQUIRED_KEYS = {
     "Classification — Human reviewed", "Classification — AI proposal, not reviewed",
     "Classification — unavailable", "Local processing on this PC",
     "Extracted classification input is sent to OpenAI",
+    "Open PDF in default browser", "PDF could not be safely located in the inbox.",
+    "Unable to open PDF. Check your default browser.",
 }
 
 

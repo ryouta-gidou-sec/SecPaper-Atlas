@@ -10,6 +10,7 @@ Version 0.1.1 is a local, inspectable classification pipeline. It prioritizes so
 |---|---|---|
 | `src/config.py` | Resolve application-owned paths and environment settings; configure rotating logs | Reads secrets from local environment only |
 | `src/pdf_parser.py` | Discover contained files, check signatures, hash content, extract bounded text and first-two-page block geometry/direction | Parses untrusted PDFs locally, read-only |
+| `src/pdf_access.py` | Locate a registered PDF by filename/hash, validate it, and open a file URI in the default browser | Contained local source files only; no serving or PDF writes |
 | `src/metadata_extractor.py` | Recover conservative bibliographic fields, provenance, and review reasons | Treats extracted text as untrusted data |
 | `src/classifier.py` | Common protocol, minimal input/prompt/schema, validation, factory and optional OpenAI provider | External paper disclosure only when OpenAI is selected |
 | `src/ollama_classifier.py` | Local model preflight and JSON Schema requests with bounded retry | Loopback only; no cloud inference or model download |
@@ -223,6 +224,37 @@ Normal scans skip classified hashes regardless of provider changes. Explicit `re
 7. Extract bounded text and first-two-page layout/direction in memory. Never save changes to the document.
 
 PDF filename changes produce the same hash and remain duplicates. Two byte-identical PDFs in different folders also map to one record.
+
+### PDF quick access
+
+Paper Detail places a localized "Open PDF in default browser" button just below
+Authors/Year/Venue. On a
+click, `src/pdf_access.py` first tries `settings.inbox_dir / filename`. Because
+the scanner stores a basename even for nested PDFs, it falls back to recursively
+matching basenames under the current inbox. Each candidate must match the existing
+`file_hash` (SHA-256), so duplicate basenames cannot select another paper. The
+stored absolute `filepath` is neither used nor changed; moving the project with
+its inbox does not invalidate this lookup. A renamed or changed source fails
+safely until its registered identity can be found again.
+
+Filename/hash values are validated at the boundary. Candidates must exist as
+regular files, have a case-insensitive `.pdf` suffix and `%PDF-` signature, and
+remain inside the resolved inbox, including after symlink/junction resolution.
+Containment is checked before reading or hashing a candidate. The matching,
+resolved path is converted with `Path.as_uri()` and passed once to
+`webbrowser.open_new_tab()`. A false return or exception produces a fixed,
+localized warning without absolute paths or underlying exception text. The UI
+no longer displays the stored local absolute path.
+
+This opens the source PDF in the local environment's default browser without
+requesting a particular browser. It is a local-only convenience for Streamlit,
+the default browser, and PDFs on the same PC. `webbrowser` acts on the server's
+PC; remote/cloud deployment cannot use it to open the client's browser. The
+browser/OS controls the final PDF handler and whether it uses a tab or window;
+the UI does not promise a new tab. A true return confirms dispatch rather than
+PDF rendering.
+No HTTP file server, upload, download, schema change, classification call, or
+review/history write is part of this action.
 
 ## Error handling
 

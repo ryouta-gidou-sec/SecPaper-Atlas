@@ -73,6 +73,19 @@ _MESSAGES = {
     ),
     "Authors": ("Authors", "著者", "저자"),
     "Venue": ("Venue", "掲載先", "게재처"),
+    "Open PDF in default browser": (
+        "Open PDF in default browser", "PDFを既定ブラウザで開く", "기본 브라우저에서 PDF 열기",
+    ),
+    "PDF could not be safely located in the inbox.": (
+        "PDF could not be safely located in the inbox.",
+        "元PDFをinbox内で安全に確認できませんでした。",
+        "inbox에서 원본 PDF를 안전하게 확인하지 못했습니다.",
+    ),
+    "Unable to open PDF. Check your default browser.": (
+        "Unable to open PDF. Check your default browser.",
+        "PDFを開けませんでした。既定ブラウザを確認してください。",
+        "PDF를 열지 못했습니다. 기본 브라우저를 확인하세요.",
+    ),
     "Abstract": ("Abstract", "要旨", "초록"),
     "Keywords": ("Keywords", "キーワード", "키워드"),
     "Classified at": ("Classified at", "分類日時", "분류 일시"),
