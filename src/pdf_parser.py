@@ -16,6 +16,18 @@ class PDFParseError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class PDFTextLine:
+    """A horizontal or rotated line within a retained front-matter block."""
+
+    text: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    font_size: float
+
+
+@dataclass(frozen=True)
 class PDFTextBlock:
     """A front-matter text block with lightweight layout information."""
 
@@ -26,6 +38,7 @@ class PDFTextBlock:
     y1: float
     font_size: float
     direction: tuple[float, float] = (1.0, 0.0)
+    lines: tuple[PDFTextLine, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -131,6 +144,39 @@ def parse_pdf(path: Path, inbox_dir: Path, max_pages: int = 12) -> ParsedPDF:
                 for key, value in raw_metadata.items()
                 if value is not None and str(value).strip()
             }
+            # Explicit publication properties only; file timestamps and generic
+            # XMP dates do not establish a publication year.
+            info_type, info_ref = document.xref_get_key(-1, "Info")
+            if info_type == "xref":
+                info_xref = int(info_ref.split()[0])
+                for key in document.xref_get_keys(info_xref):
+                    if key.casefold() in {"year", "publicationyear", "publicationdate"}:
+                        kind, value = document.xref_get_key(info_xref, key)
+                        if kind in {"string", "int"}:
+                            metadata[key.casefold()] = value[:180]
+            xml = document.get_xml_metadata()
+            if xml and len(xml) <= 128000 and not any(
+                marker in xml.upper() for marker in ("<!DOCTYPE", "<!ENTITY")
+            ):
+                from xml.etree import ElementTree
+
+                try:
+                    tree = ElementTree.fromstring(xml)
+                except ElementTree.ParseError:
+                    tree = None
+                if tree is not None:
+                    publication_tags = {
+                        "{http://prismstandard.org/namespaces/basic/2.0/}publicationDate",
+                        "{http://prismstandard.org/namespaces/basic/2.0/}coverDate",
+                        "{http://purl.org/dc/terms/}issued",
+                    }
+                    dates = {" ".join(element.itertext()).strip() for element in tree.iter()
+                             if element.tag in publication_tags and " ".join(element.itertext()).strip()}
+                    for element in tree.iter():
+                        dates.update(value.strip() for key, value in element.attrib.items()
+                                     if key in publication_tags and value.strip())
+                    if dates:
+                        metadata["publicationdate"] = "; ".join(sorted(dates))[:180]
             return ParsedPDF(
                 text="\n\n".join(page_text),
                 first_page_text=page_text[0] if page_text else "",
@@ -180,6 +226,16 @@ def _extract_text_blocks(page: Any) -> tuple[PDFTextBlock, ...]:
                          for span in line.get("spans", [])), default=0.0,
                     ),
                     direction=direction,
+                    lines=tuple(
+                        PDFTextLine(
+                            text="".join(str(span.get("text", ""))
+                                         for span in line.get("spans", []))[:6000],
+                            x0=float(line["bbox"][0]), y0=float(line["bbox"][1]),
+                            x1=float(line["bbox"][2]), y1=float(line["bbox"][3]),
+                            font_size=max((float(span.get("size", 0.0))
+                                           for span in line.get("spans", [])), default=0.0),
+                        ) for line in group if line.get("bbox")
+                    ),
                 )
             )
     return tuple(extracted)
