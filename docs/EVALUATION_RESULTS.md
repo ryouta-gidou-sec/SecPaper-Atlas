@@ -156,3 +156,118 @@ Primary Category regressionの修正を確認し、v0.1.1の評価・最終調�
 8論文・出現3Categoryだけのpilotであり、support=0のCategoryは性能未評価。100%という値はこの8件のPrimary Category一致率だけを示し、`qwen3:4b`の一般性能を示さない。
 
 この8論文の失敗パターンをPrompt改善に利用しているため、改善後の比較は**development-set comparison**である。独立したtest-set evaluationとは呼ばず、一般化性能の向上を主張しない。Confidenceはモデルの自己申告値であり、実測Accuracyや校正済み確率ではない。
+
+## Evaluation Dataset v1: formal heldout evaluation
+
+記録日: 2026-10-04（Asia/Tokyo）。IDs 1–8 は development / historical tuning、IDs 9–40 の **32本のみ**を正式 heldout として固定した。上記8本の開発比較とは別の集計であり、合算値は出さない。
+
+**GT provenance:** AI-assisted Ground Truth draft, independently reviewed and finally approved by a human reviewer. 人間は32本すべての5項目候補を修正なしで最終承認した。候補値は再解釈せず転記し、既存8件のGTは変更・再レビューしなかった。
+
+個別の frozen AI prediction は候補判断に使用せず、draft作成中の予測比較も行っていない。ただし preflight でmanifest全体の表示操作（出力は省略）とtooling内の集計assertion閲覧があった。このdocumented procedural deviationにより、strict non-exposure blindingは認定できない。予測に合わせてGTを変更したという事実を示すものではない。
+
+| 条件 | 値 |
+|---|---|
+| Dataset | evaluation-dataset-v1 |
+| Formal cohort | heldout IDs 9–40; n=32; exclusions=0 |
+| Development excluded | IDs 1–8; historical tuning |
+| Provider / Model | local / Ollama; qwen3:4b |
+| Rubric / Normalization | v1 / normalization-v1（変更なし） |
+| Protocol | evaluation-protocol-v1; 評価前固定 |
+| Prediction selection | freeze時点のcurrent AI predictionのみ |
+| Independent cross-check | 全metric・support・count・confusion matrixが完全一致、PASS |
+| Full test suite | 524 passed（既存495 + 追加29） |
+
+モデルdigestはfreeze時に観測したインストール済みモデルのidentityである。classification historyには過去runごとのmodel digestが保存されていないため、各runの実バイナリまで認定するものではない。今回モデルserverへのrequest・再分類・prompt変更はない。
+
+### Heldout metrics (n=32)
+
+| Field | Accuracy / Exact Match | Micro P | Micro R | Micro F1 | Macro P | Macro R | Macro F1 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Primary Category | 0.750000 | 0.750000 | 0.750000 | 0.750000 | 0.844048 | 0.808333 | 0.767956 |
+| Relevance | 0.093750 | 0.093750 | 0.093750 | 0.093750 | 0.233716 | 0.444444 | 0.170370 |
+| Research Methods | 0.156250 | 0.309091 | 0.265625 | 0.285714 | 0.167002 | 0.163402 | 0.118162 |
+| Tags | 0.000000 | 0.250000 | 0.340741 | 0.288401 | 0.154310 | 0.152299 | 0.150527 |
+| Target Vulnerabilities | 0.437500 | 0.160000 | 0.200000 | 0.177778 | 0.106061 | 0.101010 | 0.095960 |
+
+Primary Accuracy=24/32、Relevance Accuracy=3/32。Exact Match は Tags=0/32、Methods=5/32、Vulnerabilities=14/32。
+
+Primaryのmacroは固定8分類、Relevanceは固定A/B/C。単一ラベルmicro P/R/F1はAccuracyと等しい。multi-labelのmacroはheldout GTまたはpredictionに出現したlabel union上で計算し、zero division=0。双方空集合はexact matchに含め、空union macro=0。正規化はRubricの明示辞書と空白整理・完全一致重複排除のみ。未登録語の大小文字・親子概念は保持した。
+
+### Primary Category: per-class metrics
+
+| Class | GT Support | Predicted | Precision | Recall | F1 |
+|---|---:|---:|---:|---:|---:|
+| Account Management | 5 | 3 | 1.000000 | 0.600000 | 0.750000 |
+| Authentication | 4 | 5 | 0.800000 | 1.000000 | 0.888889 |
+| Authorization | 6 | 4 | 1.000000 | 0.666667 | 0.800000 |
+| OAuth / OIDC / SSO | 5 | 4 | 1.000000 | 0.800000 | 0.888889 |
+| Other Security | 5 | 2 | 1.000000 | 0.400000 | 0.571429 |
+| Session Management | 1 | 1 | 1.000000 | 1.000000 | 1.000000 |
+| Token Security | 4 | 6 | 0.666667 | 1.000000 | 0.800000 |
+| Vulnerability Assessment | 2 | 7 | 0.285714 | 1.000000 | 0.444444 |
+
+Confusion matrix（行GT、列AI、固定class order）:
+
+| GT / AI | Authentication | Session Management | Authorization | Token Security | OAuth / OIDC / SSO | Account Management | Vulnerability Assessment | Other Security |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Authentication | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Session Management | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Authorization | 0 | 0 | 4 | 2 | 0 | 0 | 0 | 0 |
+| Token Security | 0 | 0 | 0 | 4 | 0 | 0 | 0 | 0 |
+| OAuth / OIDC / SSO | 0 | 0 | 0 | 0 | 4 | 0 | 1 | 0 |
+| Account Management | 1 | 0 | 0 | 0 | 0 | 3 | 1 | 0 |
+| Vulnerability Assessment | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 0 |
+| Other Security | 0 | 0 | 0 | 0 | 0 | 0 | 3 | 2 |
+
+### Relevance: per-class metrics
+
+| Class | GT Support | Predicted | Precision | Recall | F1 |
+|---|---:|---:|---:|---:|---:|
+| A | 1 | 29 | 0.034483 | 1.000000 | 0.066667 |
+| B | 25 | 0 | 0.000000 | 0.000000 | 0.000000 |
+| C | 6 | 3 | 0.666667 | 0.333333 | 0.444444 |
+
+Confusion matrix（行GT、列AI、固定class order）:
+
+| GT / AI | A | B | C |
+|---|---:|---:|---:|
+| A | 1 | 0 | 0 |
+| B | 24 | 0 | 1 |
+| C | 4 | 0 | 2 |
+
+### Error patterns and limitations
+
+- Primaryでは Other Security → Vulnerability Assessment が3件、Authorization → Token Security が2件。残りはAccount Management → Authentication / Vulnerability Assessment各1件、OAuth / OIDC / SSO → Vulnerability Assessmentが1件。
+- Relevanceでは GT B → AI A が24件、GT C → AI A が4件、GT B → AI C が1件。直接関心への一致を広く判定する傾向がある。
+- Tags: TP=46 / FP=138 / FN=89。過剰付与が不足付与より多い。
+- Methods: TP=17 / FP=38 / FN=47。不足付与が過剰付与より多い。
+- Vulnerabilities: TP=4 / FP=21 / FN=16。過剰付与が多い。14/32のexact matchと低いF1の両方を読む必要があり、exact matchだけで肯定ラベルの再現性を主張しない。
+
+n=32、Primary support=1–6、Relevance A support=1という小規模・不均衡集合である。1名の人間reviewer、AI-assisted候補、既知のblinding逸脱があり、一般化性能や完全に独立したmanual-only annotationを主張しない。各フィールドで語彙・GTの疎密が違うため、F1差だけを共通の難易度尺度にはしない。
+
+証拠範囲はfreezeされたtitle / abstract / keywords、abstract欠落時のみ短いintroduction excerpt。全文に存在する手法すべての網羅性ではなく、この証拠範囲で支持されるラベルを評価する。Confidenceの校正は評価していない。原PDF、DB、metadata、AI prediction、history、Human Review、source GT、freeze、Rubric、promptは保全検証で不変。
+
+### Reproducibility identities
+
+| Identity | SHA-256 |
+|---|---|
+| Dataset content | `2852837d2aeccc8671ad76a28173fdc063e8c8dbccb93dc4562972c8715748db` |
+| Freeze manifest | `1385d3f5c5d628c7f80e9e8db00c198da87c2d84df8ff837a0f19f400f1082c1` |
+| Frozen DB snapshot | `bde660d567237a51388300c45917413936d817e8e4c26627ca7adbc568870cda` |
+| Human-approved GT v1 | `3bea5bba3f3b88c2d0086d66f029952da426828d66b94b468c84be487da4d883` |
+| Split v1 | `3dfbc9c0bc45479a17b65901c2fbf4d4df113ee28446444a5f0bd4771104aa54` |
+| Frozen AI predictions (40) | `0ad0cb62ba7248a2a505a97f2e03b2ecd175dbcf6978f67a9ae4a677cf8e5ce0` |
+| Heldout AI predictions (32) | `19ec05c1b33f2b7d99668d1a8375a8a4e2c272462817af63b5ba8b68c924f1a5` |
+| Rubric v1 | `e49ae70b8d48a1febf25c719f9df8c35cd4dbeff3b263c45c038a78de84da5ce` |
+| Evaluator sources (evaluate.py + evaluation_v1.py) | `9a174116ed741d67f74ecb42175713ca9a8418cbecf1282af9db4cf15c51fafe` |
+| Protocol v1 | `aee6be6196d392ba5926f6815e63f5c5e9364dda7cf120146fe29431a347c068` |
+| Prompt | `b9b7fdddae0c1375de55b9cf8d55d7f83dd6a202ef5fe36c3674132010fda4dd` |
+| Model observed at freeze | `359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7` |
+| Deterministic evaluation content | `e1a444632bfbfd0830ab13aecd255d82640ecc0fc3ce2891fccee3ef8e4ea150` |
+| Metrics content | `2e13cac450373f98d3898d278aba678dad6093d6589e7c7ff4e290bbafd3adb5` |
+
+content digestはUTF-8 canonical JSON（sort_keys、compact separators、ensure_ascii=False、allow_nan=False）のSHA-256。timestampはidentityへ含めない。GT・split・protocol・evaluator sourceは評価前にlockし、評価後のdigest一致を確認した。個別GT、title/hash一覧、raw結果、private audit artifactは公開しない。
+
+### No heldout tuning
+
+**Evaluation Dataset v1 / heldout IDs 9–40は、今回の正式評価後、classifier prompt tuningに使用しない。** この結果を見てprompt・model設定・normalization・taxonomy・GTを変更したり、AI predictionを再生成したりしない。改善はdevelopment IDs 1–8または新規development corpusで行い、新しいindependent test setで評価する。今回の作業は正式評価と記録で終了した。
