@@ -99,7 +99,26 @@ def main() -> None:
         default=Path("data/ground_truth.csv"),
     )
     parser.add_argument("--database", type=Path, help="Compare saved provider/model runs to Human Review labels")
+    parser.add_argument("--frozen-manifest", type=Path, help="Evaluate locked frozen five-field artifacts")
+    parser.add_argument("--ground-truth", type=Path)
+    parser.add_argument("--split", type=Path)
+    parser.add_argument("--protocol", type=Path)
     args = parser.parse_args()
+    frozen_paths = (args.frozen_manifest, args.ground_truth, args.split, args.protocol)
+    if any(frozen_paths):
+        if not all(frozen_paths) or args.database or args.csv_path != Path("data/ground_truth.csv"):
+            parser.error("Frozen evaluation requires all four artifact paths and no CSV/database input")
+        try:
+            # Supports both direct script execution and python -m scripts.evaluate.
+            if __package__:
+                from .evaluation_v1 import evaluate_frozen
+            else:
+                from evaluation_v1 import evaluate_frozen
+            result = evaluate_frozen(*frozen_paths)
+        except (ValueError, KeyError, TypeError, OSError) as error:
+            parser.error(str(error))
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+        return
     if args.database:
         groups = evaluate_provider_rows(load_database_rows(args.database))
         if not groups:

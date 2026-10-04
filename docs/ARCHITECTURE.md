@@ -466,3 +466,11 @@ Rotating logs are local and ignored by Git. They deliberately omit API keys, pro
 ## Deliberate v0.1 constraints
 
 The design excludes OCR, background jobs, full-text translation, vector databases, semantic search, recommendations, citation graphs, automatic downloads, automatic file movement, and PDF editing. Adding these prematurely would expand the attack surface and obscure the core classification evaluation.
+
+## Frozen artifact evaluation
+
+`scripts/evaluate.py` retains the CSV category and read-only database comparison paths. Its separate frozen mode delegates to `scripts/evaluation_v1.py`: explicit freeze manifest + approved GT + split-v1 + protocol-v1 JSON inputs → identity/role validation → IDs 9–40 join by ID/hash → normalization-v1 derived sets → deterministic five-field metrics on stdout. It never accesses application services, SQLite or network providers and does not initialize storage. The production schema and classification/review flow are unchanged.
+
+Canonical human values are copied into ignored local GT artifacts, independently of the immutable original AI predictions in the freeze. Development IDs 1–8 reuse historical reviewed values; heldout IDs 9–40 retain human-approved AI-assisted draft values without reinterpretation. Protocol, source, GT and split digests are fixed before scoring. Derived normalization never overwrites either source. Private orchestration stores ignored reports, confusion/per-label CSVs, preservation evidence and an independent cross-check. Only methodology, aggregate results and reproducibility identities enter public documentation.
+
+See [EVALUATION.md](EVALUATION.md#locked-heldout-evaluation-dataset-v1) for fixed class orders, zero-division/empty-set rules, documented blinding limits and the no-heldout-tuning rule.
