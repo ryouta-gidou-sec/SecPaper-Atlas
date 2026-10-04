@@ -150,22 +150,54 @@ def test_real_directory_link_escape_is_rejected_before_reading(source, browser, 
     outside.write_bytes(path.read_bytes())
     path.unlink()
     link = inbox / "linked"
+    fallback_candidate = None
+    fallback_resolutions = []
     try:
         link.symlink_to(outside_dir, target_is_directory=True)
-    except OSError:
+    except OSError as symlink_error:
+        if getattr(symlink_error, "winerror", None) not in (5, 1314):
+            raise
         # Windows directory junctions exercise real reparse-point containment
         # without requiring Developer Mode / symbolic-link privileges.
         import _winapi
 
-        _winapi.CreateJunction(str(outside_dir), str(link))
+        try:
+            _winapi.CreateJunction(str(outside_dir), str(link))
+        except OSError as junction_error:
+            if getattr(junction_error, "winerror", None) not in (5, 1314):
+                raise
+            # A restricted Windows sandbox may also deny junction creation.
+            # Keep recursive discovery real, and emulate only the link's
+            # resolved destination to exercise containment before any read.
+            # Failed junction creation can leave its empty directory behind.
+            link = inbox / "emulated-link"
+            link.mkdir()
+            fallback_candidate = link / path.name
+            fallback_candidate.write_bytes(outside.read_bytes())
+            original_resolve = Path.resolve
+
+            def linked_resolve(candidate, *args, **kwargs):
+                if candidate == fallback_candidate:
+                    fallback_resolutions.append(candidate)
+                    return original_resolve(outside, *args, **kwargs)
+                return original_resolve(candidate, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "resolve", linked_resolve)
     signature_check = Mock(wraps=pdf_access.has_pdf_signature)
+    hash_check = Mock(wraps=pdf_access.sha256_file)
     monkeypatch.setattr(pdf_access, "has_pdf_signature", signature_check)
+    monkeypatch.setattr(pdf_access, "sha256_file", hash_check)
     try:
         with pytest.raises(PDFAccessError):
             open_paper_pdf(inbox, paper)
+        if fallback_candidate is not None:
+            assert fallback_resolutions == [fallback_candidate]
         signature_check.assert_not_called()
+        hash_check.assert_not_called()
         browser.assert_not_called()
     finally:
+        if fallback_candidate is not None:
+            fallback_candidate.unlink()
         if link.is_symlink():
             link.unlink()
         else:
