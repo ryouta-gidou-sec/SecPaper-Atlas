@@ -28,6 +28,10 @@ _MESSAGES = {
     "Scan papers/inbox": ("Scan papers/inbox", "papers/inboxをスキャン", "papers/inbox 스캔"),
     "Last scan results": ("Last scan results", "前回のスキャン結果", "최근 스캔 결과"),
     "Search & filters": ("Search & filters", "検索・絞り込み", "검색 및 필터"),
+    "Favorite": ("Favorite", "お気に入り", "즐겨찾기"),
+    "Read Later": ("Read Later", "後で読む", "나중에 읽기"),
+    "Favorites only": ("Favorites only", "お気に入りのみ", "즐겨찾기만"),
+    "Read Later only": ("Read Later only", "後で読むのみ", "나중에 읽기만"),
     "Keyword": ("Keyword", "キーワード", "검색어"),
     "Choose options": ("Choose options", "選択してください", "선택하세요"),
     "Title, abstract, tag, vulnerability": (

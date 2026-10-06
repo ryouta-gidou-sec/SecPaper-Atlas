@@ -353,7 +353,7 @@ def test_pdf_quick_access_uses_selected_paper_and_preserves_data(
         assert app.button(key="open_paper_pdf").label == "📄 " + t("Open PDF in default browser", language)
         assert not app.code
         columns = app.get("column")
-        assert [round(column.proto.weight, 3) for column in columns] == [0.2] * 5 + [0.667, 0.333]
+        assert [round(column.proto.weight, 3) for column in columns] == [0.2] * 5 + [0.167, 0.167, 0.667] + [0.667, 0.333]
         assert len(columns[-2].get("button")) == 1
         assert len(columns[-1].get("form")) == 1
         before_db = database.path.read_bytes()

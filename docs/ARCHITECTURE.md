@@ -474,3 +474,35 @@ The design excludes OCR, background jobs, full-text translation, vector database
 Canonical human values are copied into ignored local GT artifacts, independently of the immutable original AI predictions in the freeze. Development IDs 1–8 reuse historical reviewed values; heldout IDs 9–40 retain human-approved AI-assisted draft values without reinterpretation. Protocol, source, GT and split digests are fixed before scoring. Derived normalization never overwrites either source. Private orchestration stores ignored reports, confusion/per-label CSVs, preservation evidence and an independent cross-check. Only methodology, aggregate results and reproducibility identities enter public documentation.
 
 See [EVALUATION.md](EVALUATION.md#locked-heldout-evaluation-dataset-v1) for fixed class orders, zero-division/empty-set rules, documented blinding limits and the no-heldout-tuning rule.
+
+## Favorite / Read Later user state
+
+`paper_user_state` stores local, user-managed flags separately from AI tags,
+classification, Human Review, Ground Truth, and the existing reading status.
+`paper_id` is the primary key and references `papers(id)` with cascading deletion;
+`is_favorite` and `read_later` are independent NOT NULL integer booleans, defaulting
+to 0 with CHECK constraints. UTC `created_at` / `updated_at` record state writes.
+
+Normal `Database.initialize()` adds the table using CREATE TABLE IF NOT EXISTS.
+No backfill is needed: absent rows read as false/false and are created only on an
+explicit state write. Existing initialization migrations retain their prior
+behavior; adding this table does not update papers, labels, reviews, or history.
+Repeated initialization preserves flags and does not rewrite an initialized DB.
+
+The repository validates positive integer paper IDs and strict boolean flags,
+uses parameterized upserts, and changes only supplied flags. Repeating the same
+values leaves timestamps and the DB unchanged. `get_user_state`, `set_user_state`,
+`set_favorite`, and `set_read_later` own access. Hydrated papers carry a separate
+`user_state` object. Search uses EXISTS predicates; enabling both user-state
+filters means AND, combined with all existing filters. Complete logical snapshots
+include the table when present so controlled metadata refresh preserves user
+state and rejects stale plans after a flag change; older DBs remain readable.
+
+The list retains its existing table with only the Favorite / Read Later checkbox
+columns editable. Its callback maps rendered row positions to captured paper IDs
+and writes only the changed flags before rerendering. A new editor baseline after
+each write prevents replaying old edits. Detail toggles use the same repository,
+refresh from persisted values, and remain outside the Human Review form. Filtered
+papers disappear immediately when a flag is cleared. Japanese, English, and Korean
+labels use `src/i18n.py`. Reloads and new sessions read the SQLite state. These
+operations never construct a classifier, scan PDFs, or make model requests.

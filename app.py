@@ -45,6 +45,22 @@ def application_services() -> tuple[Database, object, object]:
     return database, settings, logger
 
 
+def save_list_user_state(editor_key: str, paper_ids: list[int], columns: dict[str, str]) -> None:
+    """Persist the current editor event before Streamlit reloads the filtered list."""
+    edits = st.session_state[editor_key].get("edited_rows", {})
+    for row_index, edited in edits.items():
+        values = {columns[column]: value for column, value in edited.items() if column in columns}
+        if values:
+            database.set_user_state(paper_ids[int(row_index)], **values)
+    # Fresh DB values become the next editor's baseline (including changed filters).
+    st.session_state["user_state_revision"] = st.session_state.get("user_state_revision", 0) + 1
+
+
+def save_detail_user_state(paper_id: int, flag: str, widget_key: str) -> None:
+    database.set_user_state(paper_id, **{flag: st.session_state[widget_key]})
+    st.session_state["user_state_revision"] = st.session_state.get("user_state_revision", 0) + 1
+
+
 database, settings, logger = application_services()
 
 with st.sidebar:
@@ -108,6 +124,8 @@ with st.sidebar:
         t("Keyword", language), placeholder=t("Title, abstract, tag, vulnerability", language),
         key="filter_keyword",
     )
+    favorites_only = st.checkbox(t("Favorites only", language), key="filter_favorites")
+    read_later_only = st.checkbox(t("Read Later only", language), key="filter_read_later")
     facets = database.list_facets()
     categories = st.multiselect(
         t("Primary category", language), enum_values(PrimaryCategory),
@@ -199,6 +217,8 @@ papers = database.search_papers(
     relevances=relevances,
     statuses=statuses,
     classification_statuses=classification_statuses,
+    favorites_only=favorites_only,
+    read_later_only=read_later_only,
     year_min=year_min,
     year_max=year_max,
 )
@@ -210,6 +230,8 @@ if papers:
         {
             t("ID", language): paper["id"],
             t("Title", language): paper["title"] or paper["filename"],
+            t("Favorite", language): paper["user_state"]["is_favorite"],
+            t("Read Later", language): paper["user_state"]["read_later"],
             t("Year", language): paper["year"],
             t("Primary Category", language): display_enum(paper["effective_primary_category"], language)
             if paper["effective_primary_category"] else t("Unclassified", language),
@@ -230,7 +252,18 @@ if papers:
         }
         for paper in papers
     ]
-    st.dataframe(table_rows, hide_index=True, width="stretch")
+    state_columns = {t("Favorite", language): "is_favorite", t("Read Later", language): "read_later"}
+    editor_key = f"paper-user-state-{language}-{st.session_state.get('user_state_revision', 0)}"
+    st.data_editor(
+        table_rows, hide_index=True, width="stretch", key=editor_key,
+        disabled=[column for column in table_rows[0] if column not in state_columns],
+        column_config={
+            t("Favorite", language): st.column_config.CheckboxColumn("★ " + t("Favorite", language)),
+            t("Read Later", language): st.column_config.CheckboxColumn("🔖 " + t("Read Later", language)),
+        },
+        on_change=save_list_user_state,
+        args=(editor_key, [paper["id"] for paper in papers], state_columns),
+    )
 
     options = {paper["id"]: f"#{paper['id']} · {paper['title'] or paper['filename']}" for paper in papers}
     selected_id = st.selectbox(
@@ -245,6 +278,16 @@ else:
 if selected_paper:
     st.divider()
     st.subheader(selected_paper["title"] or selected_paper["filename"])
+    state_controls = st.columns([1, 1, 4])
+    for column, flag, label in (
+        (state_controls[0], "is_favorite", "Favorite"),
+        (state_controls[1], "read_later", "Read Later"),
+    ):
+        widget_key = f"user-state-{selected_paper['id']}-{flag}"
+        st.session_state[widget_key] = selected_paper["user_state"][flag]
+        with column:
+            st.toggle(t(label, language), key=widget_key, on_change=save_detail_user_state,
+                      args=(selected_paper["id"], flag, widget_key))
     detail_left, detail_right = st.columns([2, 1])
     with detail_left:
         st.markdown(f"**{t('Authors', language)}:** {', '.join(selected_paper['authors']) or t('Unknown', language)}")
