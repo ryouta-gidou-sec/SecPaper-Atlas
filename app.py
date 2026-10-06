@@ -129,6 +129,14 @@ with st.sidebar:
         st.success(t(notice, language))
     folders = database.list_folders()
     folder_names = {folder["id"]: folder["name"] for folder in folders}
+    # Re-publish stable IDs when their displayed names change. Streamlit otherwise
+    # retains the browser's old selected labels even after the database rename.
+    folder_display = (language, tuple(folder_names.items()))
+    if folder_display != st.session_state.get("_folder_display"):
+        for widget_key in list(st.session_state):
+            if widget_key in {"filter_folder", "manage_folder_id"} or widget_key.startswith("paper-folders-"):
+                st.session_state[widget_key] = st.session_state[widget_key]
+    st.session_state["_folder_display"] = folder_display
     with st.expander("＋ " + t("New Folder", language), expanded=not folders):
         with st.form("new_folder", clear_on_submit=True):
             new_folder_name = st.text_input(
@@ -144,14 +152,15 @@ with st.sidebar:
             else:
                 organization_saved("Folder created.")
 
-    if st.session_state.get("filter_folder") not in folder_names:
-        st.session_state["filter_folder"] = None
+    if st.session_state.get("filter_folder") not in {0, *folder_names}:
+        st.session_state["filter_folder"] = 0
     selected_folder_id = st.radio(
-        t("Open folder", language), [None, *folder_names], key="filter_folder",
+        t("Open folder", language), [0, *folder_names], key="filter_folder",
         format_func=lambda value: "📁 " + (
-            t("All Papers", language) if value is None else folder_names[value]
+            t("All Papers", language) if value == 0 else folder_names[value]
         ),
     )
+    selected_folder_id = selected_folder_id or None
     if folders:
         with st.expander(t("Manage folders", language)):
             if st.session_state.get("manage_folder_id") not in folder_names:
@@ -380,7 +389,9 @@ if selected_paper:
             with st.form(f"paper-folders-form-{selected_paper['id']}"):
                 paper_folder_ids = st.multiselect(
                     t("Folders", language), list(folder_names),
-                    default=[folder["id"] for folder in selected_paper["folders"]],
+                    default=None if membership_key in st.session_state else [
+                        folder["id"] for folder in selected_paper["folders"]
+                    ],
                     format_func=folder_names.__getitem__, key=membership_key,
                     placeholder=t("Choose folders", language),
                 )

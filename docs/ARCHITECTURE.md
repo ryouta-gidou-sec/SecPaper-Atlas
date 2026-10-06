@@ -479,6 +479,11 @@ Membership foreign keys cascade when the folder is deleted; paper records are
 never deleted by folder management. Existing Favorite / Read Later storage and
 operations remain in `paper_user_state`.
 
+Folder widget state stores stable IDs. The UI re-publishes these values when
+folder names or the display language change, so selected labels update immediately
+after rename. All Papers uses a UI-only zero sentinel converted to no database
+filter; no folder with ID zero is stored.
+
 Names are trimmed, bounded to 100 Unicode codepoints and reject blanks/control
 characters. The unique name_key uses NFC-normalized Python casefold rather than
 SQLite's ASCII-only NOCASE to reject Unicode case-insensitive duplicates. Updates

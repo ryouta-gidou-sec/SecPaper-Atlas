@@ -203,12 +203,14 @@ def test_ui_folder_lifecycle_and_notes(tmp_path, monkeypatch, language):
     app.button(key="rename_folder").click().run(timeout=15)
     assert not app.exception
     assert "📁 精読予定" in app.radio(key="filter_folder").options
+    assert app.radio(key="filter_folder").value == ids["卒論候補"]
+    assert "精読予定" in app.multiselect(key=f"paper-folders-{paper_id}").options
     app.button(key="delete_folder").click().run(timeout=15)
     assert len(database.list_folders()) == 2
     app.checkbox(key=f"confirm-delete-folder-{ids['卒論候補']}-精読予定").check()
     app.button(key="delete_folder").click().run(timeout=15)
     assert not app.exception
-    assert app.radio(key="filter_folder").value is None
+    assert app.radio(key="filter_folder").value == 0
     assert len(database.list_folders()) == 1
     assert database.get_paper(paper_id)["folders"][0]["name"] == "Session Security"
     assert protected(database) == baseline
