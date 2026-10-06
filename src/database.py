@@ -71,6 +71,14 @@ CREATE TABLE IF NOT EXISTS papers (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+CREATE TABLE IF NOT EXISTS paper_user_state (
+    paper_id INTEGER PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
+    is_favorite INTEGER NOT NULL DEFAULT 0 CHECK(is_favorite IN (0, 1)),
+    read_later INTEGER NOT NULL DEFAULT 0 CHECK(read_later IN (0, 1)),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE TABLE IF NOT EXISTS tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE COLLATE NOCASE
@@ -139,6 +147,7 @@ LABEL_TABLES = {
 SNAPSHOT_TABLES = (
     "papers", "tags", "research_methods", "vulnerabilities", "paper_tags",
     "paper_methods", "paper_vulnerabilities", "classification_runs", "sqlite_sequence",
+    "paper_user_state",
 )
 METADATA_COLUMNS = (
     "title", "authors_json", "year", "venue", "abstract", "introduction_excerpt",
@@ -220,6 +229,9 @@ class Database:
             "tables": {
                 table: [dict(row) for row in connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid')]
                 for table in SNAPSHOT_TABLES
+                if table != "paper_user_state" or connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+                ).fetchone()
             },
         }
 
@@ -342,6 +354,66 @@ class Database:
                 (paper["id"], paper.get("classification_provider"), paper.get("classification_model"),
                  json.dumps(snapshot, ensure_ascii=False), paper.get("classified_at")),
             )
+
+    @staticmethod
+    def _validate_paper_id(paper_id: int) -> None:
+        if type(paper_id) is not int or not 0 < paper_id <= 9223372036854775807:
+            raise ValueError("paper_id must be a positive SQLite integer")
+
+    @staticmethod
+    def _read_user_state(connection: sqlite3.Connection, paper_id: int) -> dict[str, Any]:
+        row = connection.execute(
+            "SELECT * FROM paper_user_state WHERE paper_id = ?", (paper_id,)
+        ).fetchone()
+        state = dict(row) if row else {
+            "paper_id": paper_id, "is_favorite": False, "read_later": False,
+            "created_at": None, "updated_at": None,
+        }
+        state["is_favorite"] = bool(state["is_favorite"])
+        state["read_later"] = bool(state["read_later"])
+        return state
+
+    def get_user_state(self, paper_id: int) -> dict[str, Any]:
+        """Read local user state without inserting default rows."""
+        self._validate_paper_id(paper_id)
+        with self.connect() as connection:
+            if not connection.execute("SELECT 1 FROM papers WHERE id = ?", (paper_id,)).fetchone():
+                raise ValueError("Paper does not exist")
+            return self._read_user_state(connection, paper_id)
+
+    def set_user_state(
+        self, paper_id: int, *, is_favorite: bool | None = None, read_later: bool | None = None,
+    ) -> None:
+        """Set only supplied flags; preserve the other flag and all classification data."""
+        self._validate_paper_id(paper_id)
+        flags = {"is_favorite": is_favorite, "read_later": read_later}
+        for value in flags.values():
+            if value is not None and type(value) is not bool:
+                raise ValueError("User-state flags must be booleans")
+        supplied = {name: value for name, value in flags.items() if value is not None}
+        if not supplied:
+            raise ValueError("At least one user-state flag is required")
+        # Identifiers come only from the fixed flags above, never from caller input.
+        columns = ", ".join(supplied)
+        placeholders = ", ".join("?" for _ in supplied)
+        assignments = ", ".join(f"{name} = excluded.{name}" for name in supplied)
+        changes = " OR ".join(f"paper_user_state.{name} != excluded.{name}" for name in supplied)
+        with self.connect() as connection:
+            if not connection.execute("SELECT 1 FROM papers WHERE id = ?", (paper_id,)).fetchone():
+                raise ValueError("Paper does not exist")
+            connection.execute(
+                f"""INSERT INTO paper_user_state (paper_id, {columns})
+                    VALUES (?, {placeholders}) ON CONFLICT(paper_id) DO UPDATE SET
+                    {assignments}, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE {changes}""",
+                (paper_id, *supplied.values()),
+            )
+
+    def set_favorite(self, paper_id: int, enabled: bool) -> None:
+        self.set_user_state(paper_id, is_favorite=enabled)
+
+    def set_read_later(self, paper_id: int, enabled: bool) -> None:
+        self.set_user_state(paper_id, read_later=enabled)
 
     def paper_exists(self, file_hash: str) -> bool:
         with self.connect() as connection:
@@ -635,10 +707,20 @@ class Database:
         relevances: Sequence[str] = (),
         statuses: Sequence[str] = (),
         classification_statuses: Sequence[str] = (),
+        favorites_only: bool = False,
+        read_later_only: bool = False,
         year_min: int | None = None,
         year_max: int | None = None,
     ) -> list[dict[str, Any]]:
+        if type(favorites_only) is not bool or type(read_later_only) is not bool:
+            raise ValueError("User-state filters must be booleans")
         clauses = ["1 = 1"]
+        if favorites_only:
+            clauses.append("EXISTS (SELECT 1 FROM paper_user_state us "
+                           "WHERE us.paper_id = p.id AND us.is_favorite = 1)")
+        if read_later_only:
+            clauses.append("EXISTS (SELECT 1 FROM paper_user_state us "
+                           "WHERE us.paper_id = p.id AND us.read_later = 1)")
         parameters: list[Any] = []
 
         if keyword.strip():
@@ -879,6 +961,7 @@ class Database:
         self, connection: sqlite3.Connection, row: sqlite3.Row
     ) -> dict[str, Any]:
         paper = dict(row)
+        paper["user_state"] = self._read_user_state(connection, paper["id"])
         paper["authors"] = json.loads(paper.pop("authors_json"))
         paper["keywords"] = json.loads(paper.pop("keywords_json"))
         paper["metadata_sources"] = json.loads(paper.pop("metadata_sources_json"))

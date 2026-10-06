@@ -204,7 +204,7 @@ def test_language_switch_preserves_filters_selection_data_and_layout(ui_database
         assert app.button(key=f"review-{ids[0]}-save").label == t("Save review", language)
         # Layout weights and the right-hand form stay the same for all languages.
         columns = app.get("column")
-        assert [round(column.proto.weight, 3) for column in columns] == [0.2] * 5 + [0.667, 0.333]
+        assert [round(column.proto.weight, 3) for column in columns] == [0.2] * 5 + [0.167, 0.167, 0.667] + [0.667, 0.333]
         assert len(columns[-1].get("form")) == 1
     assert database.search_papers() == before_papers
     assert database.dashboard_counts() == before_dashboard

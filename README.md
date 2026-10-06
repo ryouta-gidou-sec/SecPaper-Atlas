@@ -11,6 +11,7 @@
 - **Local LLM classification:** Ollama / `qwen3:4b`で8カテゴリ、Tags、Methods、Target Vulnerabilities、Relevanceを提案する。
 - **Structured JSON + Pydantic validation:** 共通スキーマで出力を検証し、不正な応答を保存可能な分類結果として扱わない。
 - **SQLite + Streamlit dashboard:** 論文一覧・詳細・件数・カテゴリ分布を表示し、キーワード検索とカテゴリ・タグ・手法・脆弱性・Relevance・状態・年のフィルタを提供する。
+- **Favorite / Read Later:** 一覧のチェック欄と詳細のトグルでお気に入り・後で読むキューを即保存。状態はローカルSQLiteへ永続化され、各フィルタと両方のAND絞り込みを既存検索に組み合わせられる。AI分類・Human Review・Ground Truthとは別の利用者管理データ。
 - **Human Review:** AI predictionとHuman値を別々に保持。明示的なレビュー保存でHuman値を作成し、再分類でも人間の修正と過去のAI出力を保持する。
 - **Evaluation:** CSVまたは保存済みprovider/model別の分類履歴をHumanラベルと比較するPrimary Category評価CLI。
 - **Optional OpenAI provider:** 明示的に選択した場合だけ、限定した論文情報を外部APIへ送信する。
