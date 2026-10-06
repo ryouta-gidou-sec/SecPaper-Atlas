@@ -463,6 +463,47 @@ Rotating logs are local and ignored by Git. They deliberately omit API keys, pro
 - External disclosure is minimized and bounded.
 - Runtime data is ignored by Git, with `.gitkeep` files retaining empty directory structure.
 
+## Folders and Notes
+
+The UI presents user-defined organization as Folders / フォルダ. The sidebar
+provides New Folder, a folder list with All Papers, and folder management with
+rename and deletion. Paper Detail provides a multi-folder selector with an
+explicit Save folders action, and a separate plain-text Notes editor with Save note.
+Deletion requires a checkbox naming the target folder. Names remain user text;
+they are not translated or rendered as HTML.
+
+Additive `CREATE TABLE IF NOT EXISTS` initialization creates `folders` (id, name,
+unique name_key, created_at, updated_at), `paper_folders` (paper_id, folder_id,
+composite primary key), and `paper_notes` (paper_id primary key, content, updated_at).
+Membership foreign keys cascade when the folder is deleted; paper records are
+never deleted by folder management. Existing Favorite / Read Later storage and
+operations remain in `paper_user_state`.
+
+Names are trimmed, bounded to 100 Unicode codepoints and reject blanks/control
+characters. The unique name_key uses NFC-normalized Python casefold rather than
+SQLite's ASCII-only NOCASE to reject Unicode case-insensitive duplicates. Updates
+retain stable folder IDs. Positive SQLite-sized IDs and note text up to 10000
+characters (without NUL) are validated at the repository boundary. SQL values
+are parameterized. Membership replacement validates the paper and all requested
+folders in one write transaction before replacing links; an invalid target rolls
+back the complete operation. Folder filters use EXISTS and combine with every
+existing filter without duplicating rows.
+
+Folder writes affect only folder definitions/memberships; note writes affect only
+paper_notes. Neither changes paper timestamps, source PDFs, flags, AI originals,
+classification history, or human review. Empty notes can be saved to clear content;
+reading an absent note returns an empty string without inserting a row. Saving
+identical content does not update its timestamp. Hydrated paper records expose
+folders and note separately from user_state and classification.
+
+The controlled refresh snapshot includes these tables when present, while remaining
+compatible with read-only databases predating the feature without initialization.
+Metadata preservation and retry preservation checks protect personal organization
+tables. Existing frozen refresh manifests must be regenerated and reviewed after
+this schema/source change, as their full schema and source identity no longer match.
+Folder names, memberships and notes stay local and never enter classifier payloads.
+
+
 ## Deliberate v0.1 constraints
 
 The design excludes OCR, background jobs, full-text translation, vector databases, semantic search, recommendations, citation graphs, automatic downloads, automatic file movement, and PDF editing. Adding these prematurely would expand the attack surface and obscure the core classification evaluation.

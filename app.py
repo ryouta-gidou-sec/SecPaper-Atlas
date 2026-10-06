@@ -7,7 +7,7 @@ import streamlit as st
 
 from src.classifier import ClassificationError, create_classifier
 from src.config import configure_logging, get_settings
-from src.database import Database
+from src.database import Database, FolderError, FOLDER_NAME_MAX_LENGTH, NOTE_MAX_LENGTH
 from src.i18n import LANGUAGES, display_enum, t
 from src.models import ClassificationStatus, PaperStatus, PrimaryCategory, Relevance, enum_values
 from src.pdf_access import PDFAccessError, open_paper_pdf
@@ -63,6 +63,11 @@ def save_detail_user_state(paper_id: int, flag: str, widget_key: str) -> None:
 
 database, settings, logger = application_services()
 
+
+def organization_saved(message: str) -> None:
+    st.session_state["_folder_notice"] = message
+    st.rerun()
+
 with st.sidebar:
     language = st.selectbox(
         "Language / 言語 / 언어", list(LANGUAGES),
@@ -117,6 +122,76 @@ with st.sidebar:
                 )
                 st.write(f"{icon} **{result['filename']}** — {t(str(result['status']), language)}")
                 st.caption(t(str(result["message"]), language))
+
+    st.divider()
+    st.header("📁 " + t("Folders", language))
+    if notice := st.session_state.pop("_folder_notice", None):
+        st.success(t(notice, language))
+    folders = database.list_folders()
+    folder_names = {folder["id"]: folder["name"] for folder in folders}
+    with st.expander("＋ " + t("New Folder", language), expanded=not folders):
+        with st.form("new_folder", clear_on_submit=True):
+            new_folder_name = st.text_input(
+                t("Folder name", language), max_chars=FOLDER_NAME_MAX_LENGTH,
+                key="new_folder_name",
+            )
+            create_folder = st.form_submit_button(t("Create", language), key="create_folder")
+        if create_folder:
+            try:
+                database.create_folder(new_folder_name)
+            except FolderError as exc:
+                st.error(t(str(exc), language))
+            else:
+                organization_saved("Folder created.")
+
+    if st.session_state.get("filter_folder") not in folder_names:
+        st.session_state["filter_folder"] = None
+    selected_folder_id = st.radio(
+        t("Open folder", language), [None, *folder_names], key="filter_folder",
+        format_func=lambda value: "📁 " + (
+            t("All Papers", language) if value is None else folder_names[value]
+        ),
+    )
+    if folders:
+        with st.expander(t("Manage folders", language)):
+            if st.session_state.get("manage_folder_id") not in folder_names:
+                st.session_state["manage_folder_id"] = folders[0]["id"]
+            managed_id = st.selectbox(
+                t("Folder", language), list(folder_names), format_func=folder_names.__getitem__,
+                key="manage_folder_id",
+            )
+            # Include the current name to refresh the input after a successful rename.
+            with st.form(f"rename-folder-{managed_id}-{folder_names[managed_id]}"):
+                renamed = st.text_input(
+                    t("Folder name", language), value=folder_names[managed_id],
+                    max_chars=FOLDER_NAME_MAX_LENGTH,
+                    key=f"rename-folder-{managed_id}-{folder_names[managed_id]}",
+                )
+                rename_folder = st.form_submit_button(t("Rename Folder", language), key="rename_folder")
+            if rename_folder:
+                try:
+                    database.rename_folder(managed_id, renamed)
+                except FolderError as exc:
+                    st.error(t(str(exc), language))
+                else:
+                    organization_saved("Folder renamed.")
+            with st.form(f"delete-folder-{managed_id}-{folder_names[managed_id]}"):
+                st.warning(t("Only the folder and its memberships will be removed. Papers and their saved data are kept.", language))
+                confirm_delete = st.checkbox(
+                    t('Delete folder "{name}"', language, name=folder_names[managed_id]),
+                    key=f"confirm-delete-folder-{managed_id}-{folder_names[managed_id]}",
+                )
+                delete_folder = st.form_submit_button(t("Delete Folder", language), key="delete_folder")
+            if delete_folder:
+                if not confirm_delete:
+                    st.error(t("Confirm the folder name before deleting.", language))
+                else:
+                    try:
+                        database.delete_folder(managed_id)
+                    except FolderError as exc:
+                        st.error(t(str(exc), language))
+                    else:
+                        organization_saved("Folder deleted. Papers were kept.")
 
     st.divider()
     st.header(t("Search & filters", language))
@@ -209,6 +284,7 @@ with st.expander(t("Category overview", language), expanded=dashboard["total"] >
         st.info(t("Add PDFs to papers/inbox and run a scan to build the dashboard.", language))
 
 papers = database.search_papers(
+    folder_id=selected_folder_id,
     keyword=keyword,
     categories=categories,
     tags=selected_tags,
@@ -224,6 +300,8 @@ papers = database.search_papers(
 )
 
 st.subheader(t("Papers", language))
+if selected_folder_id is not None:
+    st.text("📁 " + folder_names[selected_folder_id])
 st.caption(t("{count} result(s)", language, count=len(papers)))
 if papers:
     table_rows = [
@@ -249,6 +327,7 @@ if papers:
             t("Research Methods", language): ", ".join(paper["effective_research_methods"]),
             t("Relevance", language): paper["effective_relevance"] or "—",
             t("Status", language): display_enum(paper["status"], language),
+            t("Folders", language): ", ".join(folder["name"] for folder in paper["folders"]),
         }
         for paper in papers
     ]
@@ -290,6 +369,46 @@ if selected_paper:
                       args=(selected_paper["id"], flag, widget_key))
     detail_left, detail_right = st.columns([2, 1])
     with detail_left:
+        st.markdown("#### 📁 " + t("Folders", language))
+        if folders:
+            membership_key = f"paper-folders-{selected_paper['id']}"
+            if membership_key in st.session_state:
+                previous = st.session_state[membership_key]
+                valid = [value for value in previous if value in folder_names]
+                if valid != previous:
+                    st.session_state[membership_key] = valid
+            with st.form(f"paper-folders-form-{selected_paper['id']}"):
+                paper_folder_ids = st.multiselect(
+                    t("Folders", language), list(folder_names),
+                    default=[folder["id"] for folder in selected_paper["folders"]],
+                    format_func=folder_names.__getitem__, key=membership_key,
+                    placeholder=t("Choose folders", language),
+                )
+                save_folders = st.form_submit_button(t("Save folders", language), key="save_paper_folders")
+            if save_folders:
+                try:
+                    database.set_paper_folders(selected_paper["id"], paper_folder_ids)
+                except FolderError as exc:
+                    st.error(t(str(exc), language))
+                else:
+                    organization_saved("Folders saved.")
+        else:
+            st.info(t("Create a folder in the sidebar to organize this paper.", language))
+        st.markdown("#### 📝 " + t("Notes", language))
+        with st.form(f"paper-note-form-{selected_paper['id']}"):
+            note_text = st.text_area(
+                t("Notes", language), value=selected_paper["note"],
+                max_chars=NOTE_MAX_LENGTH, key=f"paper-note-{selected_paper['id']}",
+                placeholder=t("Write your reading notes here", language),
+            )
+            save_note = st.form_submit_button(t("Save note", language), key="save_paper_note")
+        if save_note:
+            try:
+                database.set_note(selected_paper["id"], note_text)
+            except ValueError as exc:
+                st.error(t(str(exc), language))
+            else:
+                organization_saved("Note saved.")
         st.markdown(f"**{t('Authors', language)}:** {', '.join(selected_paper['authors']) or t('Unknown', language)}")
         st.markdown(f"**{t('Year', language)}:** {selected_paper['year'] or t('Unknown', language)}")
         st.markdown(f"**{t('Venue', language)}:** {selected_paper['venue'] or t('Unknown', language)}")

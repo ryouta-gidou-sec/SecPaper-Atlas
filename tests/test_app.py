@@ -42,7 +42,8 @@ def test_sidebar_order_and_existing_widget_keys(
     assert sidebar[1].key == "ui_language"
     assert app.sidebar.selectbox[0].options == ["日本語", "English", "한국어"]
     assert [item.value for item in app.sidebar.header] == [
-        t("Library", language), t("Search & filters", language), t("Classifier", language),
+        t("Library", language), "📁 " + t("Folders", language),
+        t("Search & filters", language), t("Classifier", language),
     ]
     assert app.sidebar.button(key="scan_inbox").label == t("Scan papers/inbox", language)
     assert app.sidebar.expander[0].label == t("Last scan results", language)
@@ -50,7 +51,7 @@ def test_sidebar_order_and_existing_widget_keys(
         "filter_categories", "filter_tags", "filter_methods", "filter_vulnerabilities",
         "filter_relevances", "filter_statuses", "filter_classification_statuses",
     }
-    assert app.sidebar.text_input[0].key == "filter_keyword"
+    assert app.sidebar.text_input(key="filter_keyword").label == t("Keyword", language)
     assert app.sidebar.slider[0].key == "filter_years"
     assert sidebar.index(app.sidebar.slider[0]) < sidebar.index(app.sidebar.header[-1])
     captions = [item.value for item in app.sidebar.caption]
@@ -354,7 +355,7 @@ def test_pdf_quick_access_uses_selected_paper_and_preserves_data(
         assert not app.code
         columns = app.get("column")
         assert [round(column.proto.weight, 3) for column in columns] == [0.2] * 5 + [0.167, 0.167, 0.667] + [0.667, 0.333]
-        assert len(columns[-2].get("button")) == 1
+        assert sum(button.key == "open_paper_pdf" for button in columns[-2].get("button")) == 1
         assert len(columns[-1].get("form")) == 1
         before_db = database.path.read_bytes()
         before_papers = database.search_papers()

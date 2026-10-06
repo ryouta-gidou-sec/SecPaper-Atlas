@@ -9,6 +9,7 @@ import hashlib
 import math
 from pathlib import Path
 import sqlite3
+import unicodedata
 from typing import Any, Iterator
 
 from src.models import (
@@ -95,6 +96,24 @@ CREATE TABLE IF NOT EXISTS classification_runs (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_classification_runs_paper ON classification_runs(paper_id);
+CREATE TABLE IF NOT EXISTS folders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 100),
+    name_key TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE TABLE IF NOT EXISTS paper_folders (
+    paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+    folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+    PRIMARY KEY (paper_id, folder_id)
+);
+CREATE INDEX IF NOT EXISTS idx_paper_folders_folder ON paper_folders(folder_id, paper_id);
+CREATE TABLE IF NOT EXISTS paper_notes (
+    paper_id INTEGER PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
+    content TEXT NOT NULL CHECK(length(content) <= 10000),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
 CREATE TABLE IF NOT EXISTS research_methods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE COLLATE NOCASE
@@ -154,6 +173,10 @@ METADATA_COLUMNS = (
     "keywords_json", "metadata_sources_json", "metadata_review_reasons_json",
 )
 
+ORGANIZATION_TABLES = ("folders", "paper_folders", "paper_notes")
+FOLDER_NAME_MAX_LENGTH = 100
+NOTE_MAX_LENGTH = 10000
+
 
 def snapshot_digest(snapshot: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(
@@ -174,6 +197,27 @@ def metadata_values(metadata: ExtractedMetadata) -> tuple[Any, ...]:
 
 class DuplicatePaperError(RuntimeError):
     """Raised when a file hash already exists."""
+
+
+class FolderError(ValueError):
+    """Localized, safe validation feedback for folder operations."""
+
+
+def _folder_name(value: str) -> tuple[str, str]:
+    if not isinstance(value, str) or not value.strip():
+        raise FolderError("Enter a folder name.")
+    name = value.strip()
+    if len(name) > FOLDER_NAME_MAX_LENGTH:
+        raise FolderError("Folder names must be 100 characters or fewer.")
+    if any(unicodedata.category(char) == "Cc" for char in name):
+        raise FolderError("Folder names cannot contain control characters.")
+    return name, unicodedata.normalize("NFC", name.casefold())
+
+
+def _positive_id(value: int) -> int:
+    if type(value) is not int or not 0 < value <= 9223372036854775807:
+        raise FolderError("Invalid paper or folder ID.")
+    return value
 
 
 def _validated_processing_seconds(value: float | None) -> float | None:
@@ -222,16 +266,17 @@ class Database:
     @staticmethod
     def snapshot(connection: sqlite3.Connection) -> dict[str, Any]:
         """Exact local comparison data, including schema, labels and all history."""
+        present = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
         return {
             "schema": [list(row) for row in connection.execute(
                 "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
             )],
             "tables": {
                 table: [dict(row) for row in connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid')]
-                for table in SNAPSHOT_TABLES
-                if table != "paper_user_state" or connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
-                ).fetchone()
+                for table in (*SNAPSHOT_TABLES, *ORGANIZATION_TABLES)
+                if table not in (*ORGANIZATION_TABLES, "paper_user_state") or table in present
             },
         }
 
@@ -696,6 +741,78 @@ class Database:
             ).fetchone()
             return self._hydrate(connection, row) if row else None
 
+    def list_folders(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            return [dict(row) for row in connection.execute(
+                """SELECT f.*, count(pf.paper_id) AS paper_count FROM folders f
+                   LEFT JOIN paper_folders pf ON pf.folder_id = f.id
+                   GROUP BY f.id ORDER BY f.name_key, f.id"""
+            )]
+
+    def set_note(self, paper_id: int, content: str) -> None:
+        """Save a local, plain-text note independently of flags, folders and review."""
+        paper_id = _positive_id(paper_id)
+        if not isinstance(content, str) or len(content) > NOTE_MAX_LENGTH or "\x00" in content:
+            raise ValueError("Notes must be text of 10000 characters or fewer without null characters.")
+        with self.connect() as connection:
+            if not connection.execute("SELECT 1 FROM papers WHERE id = ?", (paper_id,)).fetchone():
+                raise FolderError("This paper no longer exists.")
+            connection.execute(
+                """INSERT INTO paper_notes (paper_id, content) VALUES (?, ?)
+                   ON CONFLICT(paper_id) DO UPDATE SET content = excluded.content,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                   WHERE paper_notes.content != excluded.content""", (paper_id, content),
+            )
+
+    def create_folder(self, name: str) -> int:
+        name, name_key = _folder_name(name)
+        with self.connect() as connection:
+            try:
+                cursor = connection.execute(
+                    "INSERT INTO folders (name, name_key) VALUES (?, ?)", (name, name_key)
+                )
+            except sqlite3.IntegrityError:
+                raise FolderError("A folder with this name already exists.") from None
+            return cursor.lastrowid
+
+    def rename_folder(self, folder_id: int, name: str) -> None:
+        folder_id = _positive_id(folder_id)
+        name, name_key = _folder_name(name)
+        with self.connect() as connection:
+            try:
+                cursor = connection.execute(
+                    """UPDATE folders SET name = ?, name_key = ?,
+                       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?""",
+                    (name, name_key, folder_id),
+                )
+            except sqlite3.IntegrityError:
+                raise FolderError("A folder with this name already exists.") from None
+            if cursor.rowcount != 1:
+                raise FolderError("This folder no longer exists.")
+
+    def delete_folder(self, folder_id: int) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute("DELETE FROM folders WHERE id = ?", (_positive_id(folder_id),))
+            if cursor.rowcount != 1:
+                raise FolderError("This folder no longer exists.")
+
+    def set_paper_folders(self, paper_id: int, folder_ids: Sequence[int]) -> None:
+        """Atomically replace membership without writing any paper/classification fields."""
+        paper_id = _positive_id(paper_id)
+        ids = sorted({_positive_id(value) for value in folder_ids})
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not connection.execute("SELECT 1 FROM papers WHERE id = ?", (paper_id,)).fetchone():
+                raise FolderError("This paper no longer exists.")
+            for folder_id in ids:
+                if not connection.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone():
+                    raise FolderError("This folder no longer exists.")
+            connection.execute("DELETE FROM paper_folders WHERE paper_id = ?", (paper_id,))
+            connection.executemany(
+                "INSERT INTO paper_folders (paper_id, folder_id) VALUES (?, ?)",
+                [(paper_id, folder_id) for folder_id in ids],
+            )
+
     def search_papers(
         self,
         *,
@@ -711,6 +828,7 @@ class Database:
         read_later_only: bool = False,
         year_min: int | None = None,
         year_max: int | None = None,
+        folder_id: int | None = None,
     ) -> list[dict[str, Any]]:
         if type(favorites_only) is not bool or type(read_later_only) is not bool:
             raise ValueError("User-state filters must be booleans")
@@ -722,6 +840,13 @@ class Database:
             clauses.append("EXISTS (SELECT 1 FROM paper_user_state us "
                            "WHERE us.paper_id = p.id AND us.read_later = 1)")
         parameters: list[Any] = []
+
+        if folder_id is not None:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM paper_folders pf "
+                "WHERE pf.paper_id = p.id AND pf.folder_id = ?)"
+            )
+            parameters.append(_positive_id(folder_id))
 
         if keyword.strip():
             pattern = f"%{keyword.strip().casefold()}%"
@@ -961,6 +1086,14 @@ class Database:
         self, connection: sqlite3.Connection, row: sqlite3.Row
     ) -> dict[str, Any]:
         paper = dict(row)
+        paper["folders"] = [dict(folder) for folder in connection.execute(
+            """SELECT f.id, f.name FROM folders f JOIN paper_folders pf ON pf.folder_id = f.id
+               WHERE pf.paper_id = ? ORDER BY f.name_key, f.id""", (paper["id"],)
+        )]
+        note = connection.execute(
+            "SELECT content FROM paper_notes WHERE paper_id = ?", (paper["id"],)
+        ).fetchone()
+        paper["note"] = note["content"] if note else ""
         paper["user_state"] = self._read_user_state(connection, paper["id"])
         paper["authors"] = json.loads(paper.pop("authors_json"))
         paper["keywords"] = json.loads(paper.pop("keywords_json"))
