@@ -408,6 +408,9 @@ def _assert_retry_preservation(before: dict[str, Any], after: dict[str, Any], ta
                "classification_status", "classification_error", "classification_provider",
                "classification_model", "classified_at", "processing_seconds", "updated_at"}
     old_tables, new_tables = before["tables"], after["tables"]
+    for table in ("paper_user_state", "folders", "paper_folders", "paper_notes"):
+        if old_tables.get(table) != new_tables.get(table):
+            raise RefreshRejected("Classification changed personal organization data; rolling back")
     if before["schema"] != after["schema"]:
         raise RefreshRejected("Classification changed schema; rolling back")
     for old, new in zip(old_tables["papers"], new_tables["papers"], strict=True):
